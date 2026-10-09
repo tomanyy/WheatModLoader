@@ -6,5 +6,5 @@
 > [!WARNING]  
 > WML doesn't support any projects that try to bypass/delete the `-insecure` check of the program.
 
-![Latest Release](https://img.shields.io/github/v/release/tomanyy/WheatModLoader?label=latest%20release)
+[![Latest Release](https://img.shields.io/github/v/release/tomanyy/WheatModLoader?label=latest%20release)](https://github.com/tomanyy/WheatModLoader/releases/latest)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL%203.0-blue.svg)](LICENSE)
