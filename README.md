@@ -10,3 +10,9 @@
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL%203.0-blue.svg)](LICENSE)
 ![Stars](https://img.shields.io/github/stars/tomanyy/WheatModLoader)
 [![Issues](https://img.shields.io/github/issues/tomanyy/WheatModLoader)](https://github.com/tomanyy/WheatModLoader/issues)
+
+## Install
+### Release
+Download the latest release of the loader [here](https://github.com/tomanyy/WheatModLoader/releases/latest).
+### From source
+*WIP*
