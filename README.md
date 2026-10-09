@@ -10,4 +10,3 @@
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL%203.0-blue.svg)](LICENSE)
 ![Stars](https://img.shields.io/github/stars/tomanyy/WheatModLoader)
 ![Issues](https://img.shields.io/github/issues/tomanyy/WheatModLoader)
-![Build](https://github.com/tomanyy/WheatModLoader/actions/workflows/ci.yml/badge.svg)
