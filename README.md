@@ -6,13 +6,15 @@
 > [!WARNING]  
 > WML doesn't support any projects that try to bypass/delete the `-insecure` check of the program.
 
-[![Latest Release](https://img.shields.io/github/v/release/tomanyy/WheatModLoader?label=latest%20release)](https://github.com/tomanyy/WheatModLoader/releases/latest)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL%203.0-blue.svg)](LICENSE)
 ![Stars](https://img.shields.io/github/stars/tomanyy/WheatModLoader)
 [![Issues](https://img.shields.io/github/issues/tomanyy/WheatModLoader)](https://github.com/tomanyy/WheatModLoader/issues)
 
-## Install
-### Release
-Download the latest release of the loader [here](https://github.com/tomanyy/WheatModLoader/releases/latest).
-### From source
-*WIP*
+## Installation
+
+### Download a Release
+[![Latest Release](https://img.shields.io/github/v/release/tomanyy/WheatModLoader?label=latest%20release)](https://github.com/tomanyy/WheatModLoader/releases/latest)
+Download the latest version of WheatModLoader from the Releases page.
+
+### Build from Source
+*WIP ;)*
