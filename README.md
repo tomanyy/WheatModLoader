@@ -5,3 +5,5 @@
 
 > [!WARNING]  
 > WML doesn't support any projects that try to bypass/delete the `-insecure` check of the program.
+
+[![GitHub release (latest by date)](https://shields.io)](https://github.com)
