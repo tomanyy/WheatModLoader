@@ -18,7 +18,7 @@
 Download the latest version of Wheat Mod Loader from the Releases page.
 
 ### Build from Source
-figure it out yourself brah
+*WIP ;)*
 
 ## Features
 - Lua 5.4 Sandbox
