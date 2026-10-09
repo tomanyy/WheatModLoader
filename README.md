@@ -15,7 +15,17 @@
 ### Download a Release
 [![Latest Release](https://img.shields.io/github/v/release/tomanyy/WheatModLoader?label=latest%20release)](https://github.com/tomanyy/WheatModLoader/releases/latest)
 
-Download the latest version of WheatModLoader from the Releases page.
+Download the latest version of Wheat Mod Loader from the Releases page.
 
 ### Build from Source
 *WIP ;)*
+
+## Features
+- Lua 5.4 Sandbox
+- Custom API to interact with the game
+
+## Contributing
+See [CONTRIBUTING.md](CONTRIBUTING.md) for information about contribution.
+
+## License
+GPL-3.0 license
