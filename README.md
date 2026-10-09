@@ -14,6 +14,7 @@
 
 ### Download a Release
 [![Latest Release](https://img.shields.io/github/v/release/tomanyy/WheatModLoader?label=latest%20release)](https://github.com/tomanyy/WheatModLoader/releases/latest)
+
 Download the latest version of WheatModLoader from the Releases page.
 
 ### Build from Source
