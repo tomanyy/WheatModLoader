@@ -6,4 +6,5 @@
 > [!WARNING]  
 > WML doesn't support any projects that try to bypass/delete the `-insecure` check of the program.
 
+[![Latest Release](https://shields.io)](https://github.com)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL%203.0-blue.svg)](LICENSE)
