@@ -1,2 +1,0 @@
-/usr/bin/ar qc liblua_sandbox.a CMakeFiles/lua_sandbox.dir/src/lua_sandbox.cpp.o
-/usr/bin/ranlib liblua_sandbox.a
