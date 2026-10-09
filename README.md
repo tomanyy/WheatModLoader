@@ -1,10 +1,5 @@
-<div align="center">
-
 # Wheat Mod Loader
 **A mod loader for Counter-Strike 2**
-
-</div>
-
 ---
 ## Notes
 > [!NOTE]  
