@@ -1,0 +1,6 @@
+/home/tomany/Dokumenty/modloader/build/CMakeFiles/lua_sandbox.dir
+/home/tomany/Dokumenty/modloader/build/CMakeFiles/sandbox_tests.dir
+/home/tomany/Dokumenty/modloader/build/CMakeFiles/gate_tests.dir
+/home/tomany/Dokumenty/modloader/build/CMakeFiles/test.dir
+/home/tomany/Dokumenty/modloader/build/CMakeFiles/edit_cache.dir
+/home/tomany/Dokumenty/modloader/build/CMakeFiles/rebuild_cache.dir

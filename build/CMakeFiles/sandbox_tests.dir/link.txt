@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG -Wl,--dependency-file=CMakeFiles/sandbox_tests.dir/link.d CMakeFiles/sandbox_tests.dir/tests/sandbox_tests.cpp.o -o sandbox_tests  liblua_sandbox.a /usr/lib/liblua5.4.so -lm
