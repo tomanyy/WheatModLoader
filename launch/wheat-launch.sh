@@ -23,4 +23,5 @@ else
   echo "[wheat] -insecure NOT present: starting the game WITHOUT the mod loader." >&2
 fi
 
+echo "[$(date +%T)] override=${WINEDLLOVERRIDES-unset} args: $*" >> "$HOME/wheat-launch.log"
 exec "$@"
