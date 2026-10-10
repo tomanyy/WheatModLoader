@@ -1,4 +1,18 @@
 #pragma once
+// Per-mod Lua 5.4 sandbox.
+//
+// Design: ONE lua_State PER MOD. That gives us, for free:
+//   * a separate memory budget per mod (custom allocator)
+//   * a separate instruction budget per mod (count hook)
+//   * no shared string metatable / library tables between mods
+//   * a mod that dies (OOM, runaway loop) takes only itself down
+//
+// Inside a state, a mod only ever sees a hand-built whitelist environment.
+// The real globals table is never reachable from Lua.
+//
+// SECURITY MODEL: the sandbox boundary is "the lua_State + the whitelist env".
+// Everything the HOST registers via add_api() is attack surface: treat every
+// argument coming from Lua as hostile and validate it.
 
 #include <cstddef>
 #include <cstdint>
@@ -24,6 +38,9 @@ struct SandboxLimits {
     std::size_t memory_bytes        = 16 * 1024 * 1024;  // hard cap on Lua heap
     std::uint64_t load_instructions = 20'000'000;        // budget for main.lua
     std::uint64_t event_instructions = 500'000;          // budget PER event handler call
+    std::uint64_t pattern_steps     = 5'000'000;         // per-call cap on matcher work (also drawn from the instruction budget)
+    int load_wall_ms                = 2000;              // wall-clock cap for main.lua (catches slow C calls in loops)
+    int event_wall_ms               = 50;                // wall-clock cap PER event handler call
     int max_strikes                 = 3;                 // budget/memory violations before the mod is disabled
 };
 

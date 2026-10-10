@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(modloader_sandbox CXX)
+project(modloader_sandbox C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -28,8 +28,12 @@ if(NOT LUA_TARGET_OK)
   set(LUA_TARGET lua54_fallback)
 endif()
 
-add_library(lua_sandbox STATIC src/lua_sandbox.cpp)
-target_include_directories(lua_sandbox PUBLIC include)
+set(STRLIB_DIR third_party/lua_strlib)
+set_source_files_properties(${STRLIB_DIR}/lstrlib_patched.c PROPERTIES
+  COMPILE_DEFINITIONS "_CRT_SECURE_NO_WARNINGS;_XOPEN_SOURCE=600;_LARGEFILE_SOURCE;_FILE_OFFSET_BITS=64"
+  LANGUAGE C)
+add_library(lua_sandbox STATIC src/lua_sandbox.cpp ${STRLIB_DIR}/lstrlib_patched.c)
+target_include_directories(lua_sandbox PUBLIC include PRIVATE ${STRLIB_DIR})
 target_link_libraries(lua_sandbox PUBLIC ${LUA_TARGET})
 if(MSVC)
   target_compile_options(lua_sandbox PRIVATE /W4)

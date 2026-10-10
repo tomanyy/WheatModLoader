@@ -4,7 +4,10 @@
 
 static_assert(LUA_VERSION_NUM == 504, "lua_sandbox targets Lua 5.4 exactly (Lua 5.5 changed the C API)");
 
+#include "wheat_pattern_hooks.h"
+
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -21,7 +24,7 @@ namespace fs = std::filesystem;
 
 namespace modloader::detail {
 
-constexpr int kHookStride                    = 1000;       // VM instructions between hook calls
+constexpr int kHookStride                    = 128;        // VM instructions between hook calls (deadline check granularity)
 constexpr std::size_t kMaxSourceBytes        = 1 << 20;    // 1 MiB per script file
 constexpr std::size_t kMaxHandlersPerEvent   = 32;
 constexpr std::size_t kMaxLogLine            = 4096;
@@ -43,8 +46,11 @@ struct SandboxImpl {
 
     // instruction budget for the call currently in progress
     std::uint64_t budget = 0;
-    std::uint64_t used = 0;
+    std::uint64_t used = 0;          // VM instructions
+    lua_Unsigned pattern_used = 0;   // pattern-matcher steps (same pool as instructions)
     bool tripped = false;
+    const char* trip_reason = nullptr;
+    std::chrono::steady_clock::time_point deadline{};
 
     int strikes = 0;
     bool dead = false;
@@ -58,7 +64,7 @@ struct SandboxImpl {
             if (e == n) return true;
         return false;
     }
-    int guarded_pcall(int nargs, int nres, std::uint64_t instruction_budget);
+    int guarded_pcall(int nargs, int nres, std::uint64_t instruction_budget, int wall_ms);
     void strike(int rc);
     void build_env();
 };
@@ -92,13 +98,41 @@ static void budget_hook(lua_State* L, lua_Debug*) {
     SandboxImpl* im = impl_of(L);
     if (!im->tripped) {
         im->used += static_cast<std::uint64_t>(lua_gethookcount(L));
-        if (im->used <= im->budget) return;
-        im->tripped = true;
+        if (im->used + im->pattern_used > im->budget) {
+            im->tripped = true;
+            im->trip_reason = "sandbox: instruction budget exceeded";
+        } else if (std::chrono::steady_clock::now() > im->deadline) {
+            // Catches loops of slow C calls (table.insert(t,1,x) on a big table, etc.) that burn
+            // lots of time for very few VM instructions.
+            im->tripped = true;
+            im->trip_reason = "sandbox: time budget exceeded";
+        } else {
+            return;
+        }
     }
     // Once tripped, fire on EVERY instruction of this thread. A script that wraps the
     // runaway loop in pcall() can catch one error, but not the next instruction's.
     lua_sethook(L, budget_hook, LUA_MASKCOUNT, 1);
-    lua_pushliteral(L, "sandbox: instruction budget exceeded");
+    lua_pushstring(L, im->trip_reason);
+    lua_error(L);
+}
+
+// Called by the patched string library when one pattern call exceeds its step limit.
+extern "C" lua_Unsigned* wheat_pattern_counter(lua_State* L) { return &impl_of(L)->pattern_used; }
+
+extern "C" lua_Unsigned wheat_pattern_allowance(lua_State* L) {
+    const SandboxImpl* im = impl_of(L);
+    const std::uint64_t spent = im->used + im->pattern_used;
+    const std::uint64_t left  = im->budget > spent ? im->budget - spent : 0;
+    return static_cast<lua_Unsigned>(std::min<std::uint64_t>(left, im->limits.pattern_steps));
+}
+
+extern "C" void wheat_pattern_exhausted(lua_State* L) {
+    SandboxImpl* im = impl_of(L);
+    im->tripped = true;
+    im->trip_reason = "sandbox: pattern-matching budget exceeded";
+    lua_sethook(L, budget_hook, LUA_MASKCOUNT, 1);
+    lua_pushstring(L, im->trip_reason);
     lua_error(L);
 }
 
@@ -113,13 +147,15 @@ static int msg_handler(lua_State* L) {
     return 1;
 }
 
-int SandboxImpl::guarded_pcall(int nargs, int nres, std::uint64_t instruction_budget) {
+int SandboxImpl::guarded_pcall(int nargs, int nres, std::uint64_t instruction_budget, int wall_ms) {
     const int base = lua_gettop(L) - nargs;
     lua_pushcfunction(L, msg_handler);
     lua_insert(L, base);
     used = 0;
+    pattern_used = 0;
     budget = instruction_budget;
     tripped = false;
+    deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wall_ms);
     lua_sethook(L, budget_hook, LUA_MASKCOUNT, kHookStride);
     const int rc = lua_pcall(L, nargs, nres, base);
     lua_sethook(L, nullptr, 0, 0);
@@ -317,7 +353,8 @@ static void make_readonly(lua_State* L) {
 static int open_libs(lua_State* L) {
     // Deliberately NOT luaL_openlibs: io, os, package and debug are never opened.
     luaL_requiref(L, LUA_GNAME, luaopen_base, 1);      lua_pop(L, 1);
-    luaL_requiref(L, LUA_STRLIBNAME, luaopen_string, 1);   lua_pop(L, 1);
+    // Patched string library: identical to upstream except pattern matching is step-limited.
+    luaL_requiref(L, LUA_STRLIBNAME, wheat_luaopen_string, 1); lua_pop(L, 1);
     luaL_requiref(L, LUA_TABLIBNAME, luaopen_table, 1);    lua_pop(L, 1);
     luaL_requiref(L, LUA_MATHLIBNAME, luaopen_math, 1);    lua_pop(L, 1);
     luaL_requiref(L, LUA_UTF8LIBNAME, luaopen_utf8, 1);    lua_pop(L, 1);
@@ -451,7 +488,9 @@ ModSandbox::~ModSandbox() {
     // lua_close runs every pending __gc finalizer, which is mod code. Meter it.
     impl_->tripped = false;
     impl_->used    = 0;
+    impl_->pattern_used = 0;
     impl_->budget  = impl_->limits.event_instructions;
+    impl_->deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(impl_->limits.event_wall_ms);
     lua_sethook(impl_->L, budget_hook, LUA_MASKCOUNT, kHookStride);
     lua_close(impl_->L);
 }
@@ -484,7 +523,7 @@ bool ModSandbox::load_main() {
 
     bool ok = push_chunk(L, &im, "main.lua", "@main.lua", env_idx);
     if (ok) {
-        const int rc = im.guarded_pcall(0, 0, im.limits.load_instructions);
+        const int rc = im.guarded_pcall(0, 0, im.limits.load_instructions, im.limits.load_wall_ms);
         ok = (rc == LUA_OK);
         if (!ok) im.emit(LogLevel::Error, lua_tostring(L, -1) ? lua_tostring(L, -1) : "unknown error");
     } else {
@@ -516,7 +555,7 @@ bool ModSandbox::dispatch(const std::string& event, const std::vector<EventArg>&
     for (lua_Unsigned i = 1; i <= n && !im.dead; ++i) {
         lua_rawgeti(L, handlers, static_cast<lua_Integer>(i));
         for (const auto& a : args) push_arg(L, a);
-        const int rc = im.guarded_pcall(static_cast<int>(args.size()), 0, im.limits.event_instructions);
+        const int rc = im.guarded_pcall(static_cast<int>(args.size()), 0, im.limits.event_instructions, im.limits.event_wall_ms);
         if (rc != LUA_OK) {
             all_ok = false;
             im.emit(LogLevel::Error, lua_tostring(L, -1) ? lua_tostring(L, -1) : "unknown error");

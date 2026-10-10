@@ -39,6 +39,7 @@ struct Harness {
             lim.memory_bytes      = 8 * 1024 * 1024;
             lim.load_instructions = 5'000'000;
             lim.event_instructions = 200'000;
+            lim.load_wall_ms       = 1000;
         }
         sb = std::make_unique<ModSandbox>(id, root, lim, [this](std::string_view, LogLevel, std::string_view m) {
             logs.emplace_back(m);
@@ -61,7 +62,7 @@ struct Harness {
     }
 };
 
-static void check(const char* name, bool cond, const std::string& detail = "") {
+static void check(const std::string& name, bool cond, const std::string& detail = "") {
     ++g_run;
     if (cond) {
         std::cout << "  PASS  " << name << "\n";
@@ -84,7 +85,8 @@ static void expect_stopped(const char* name, const std::string& lua, const char*
     const auto t0 = std::chrono::steady_clock::now();
     const bool ok = h.sb->load_main();
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
-    check(name, !ok && h.logged(why) && ms < 5000, h.all_logs() + "    (took " + std::to_string(ms) + " ms)\n");
+    check(std::string(name) + " (" + std::to_string(ms) + " ms)", !ok && h.logged(why) && ms < 5000,
+          h.all_logs() + "    (took " + std::to_string(ms) + " ms)\n");
 }
 
 int main() {
@@ -156,6 +158,71 @@ int main() {
     expect_stopped("string concat doubling bomb", "local s = 'x' while true do s = s .. s end", "memory");
     expect_stopped("runaway recursion (stopped by the memory cap before Lua's own stack limit)", "local function f() return 1 + f() end f()", "memory");
 
+
+    std::cout << "== pattern matching DoS (single C call the instruction hook cannot see) ==\n";
+    expect_stopped("find: nested quantifiers",
+                   "local s = ('a'):rep(40); s:find(('a*'):rep(12) .. 'b')", "pattern-matching budget");
+    expect_stopped("match: 2^n optional-item explosion",
+                   "local s = ('a'):rep(30); s:match(('a?'):rep(30) .. ('a'):rep(30))", "pattern-matching budget");
+    expect_stopped("gmatch: catastrophic pattern in iterator",
+                   "for w in (('a'):rep(40)):gmatch(('a*'):rep(12) .. 'b') do end", "pattern-matching budget");
+    expect_stopped("gsub: catastrophic pattern",
+                   "(('a'):rep(40)):gsub(('a*'):rep(12) .. 'b', 'x')", "pattern-matching budget");
+    expect_stopped("%b on unbalanced input (quadratic scanning)",
+                   "(('('):rep(30000)):find('%b()')", "pattern-matching budget");
+    expect_stopped("back-reference compare blowup",
+                   "(('a'):rep(6000)):find('(a*)%1b')", "pattern-matching budget");
+    expect_stopped("pcall cannot swallow a pattern-budget error",
+                   "local s = ('a'):rep(40) local p = ('a*'):rep(12) .. 'b'\n"
+                   "while true do pcall(string.find, s, p) end", "budget");
+    expect_stopped("many moderately expensive pattern calls in a loop",
+                   "local s = ('a'):rep(60) local p = ('a*'):rep(3) .. 'b'\n"
+                   "for i = 1, 1e7 do s:find(p) end", "budget");
+
+    std::cout << "== slow C calls in loops (few VM instructions, lots of time) ==\n";
+    expect_stopped("table.insert(t,1,x) on a big table in a loop",
+                   "local t = {} for i = 1, 200000 do t[i] = i end\n"
+                   "for i = 1, 1e7 do table.insert(t, 1, i); table.remove(t) end", "time budget");
+
+    std::cout << "== patched string library still behaves like upstream ==\n";
+    expect_ok("find / match / captures / positions",
+              "assert(('hello world'):find('o w') == 5)\n"
+              "local s, e, k, v = ('key=value'):find('(%w+)=(%w+)')\n"
+              "assert(s == 1 and e == 9 and k == 'key' and v == 'value')\n"
+              "assert(('abc'):find('()b()') == 2 and select(3, ('abc'):find('()b()')) == 2)\n"
+              "assert(('  trim  '):match('^%s*(.-)%s*$') == 'trim')\n"
+              "assert(('<a><b>'):match('<(.-)>') == 'a')\n"
+              "assert(('abab'):match('(ab)%1') == 'ab')\n"
+              "assert(('f(a(b)c)d'):match('%b()') == '(a(b)c)')\n"
+              "assert(('THE (quick) fox'):find('%f[%a]%a+%f[%A]') == 1)\n"
+              "assert(('a.b'):find('.', 1, true) == 2)\n");
+    expect_ok("gsub with string, table and function replacements",
+              "assert(('abc'):gsub('%w', '%0%0') == 'aabbcc')\n"
+              "assert(('hello'):gsub('l', {l = 'L'}) == 'heLLo')\n"
+              "assert(('hello world'):gsub('%w+', string.upper) == 'HELLO WORLD')\n"
+              "local _, n = ('aaa'):gsub('a', 'b', 2); assert(n == 2)\n");
+    expect_ok("gmatch iterates correctly",
+              "local words = {}\n"
+              "for w in ('one two  three'):gmatch('%a+') do words[#words + 1] = w end\n"
+              "assert(#words == 3 and words[3] == 'three')\n"
+              "local kv = {}\n"
+              "for k, v in ('a=1, b=2'):gmatch('(%w+)=(%w+)') do kv[k] = v end\n"
+              "assert(kv.a == '1' and kv.b == '2')\n");
+    expect_ok("malformed patterns still raise ordinary errors",
+              "assert(not pcall(string.find, 'a', '[a'))\n"
+              "assert(not pcall(string.find, 'a', '%'))\n"
+              "assert(not pcall(string.rep))\n");
+    expect_ok("string.format and the rest of the library are intact",
+              "assert(string.format('%5.2f|%d|%s', 3.14159, 42, 'x') == ' 3.14|42|x')\n"
+              "assert(string.format('%q', 'a\\nb') == '\"a\\\\\\nb\"')\n"
+              "assert(('abc'):upper() == 'ABC' and ('abc'):reverse() == 'cba' and ('abc'):byte(2) == 98)\n"
+              "assert(string.pack and #string.pack('i4', 7) == 4)\n");
+    expect_ok("large legitimate inputs stay within the pattern budget",
+              "local big = ('x'):rep(1000000)\n"
+              "assert(big:find('y') == nil)\n"
+              "assert(#big:gsub('x', 'y') == 1000000)\n"
+              "assert(select(2, big:gsub('x', 'x')) == 1000000)\n");
+
     std::cout << "== host API ==\n";
     expect_ok("host API works and is read-only",
               "assert(game.map_name() == 'de_dust2')\n"
@@ -209,6 +276,19 @@ int main() {
         h.sb->dispatch("frame");
         check("memory-bomb handler is contained; later handlers still run; heap stays under cap",
               h.logged("survivor") && h.sb->memory_used() <= 8u * 1024 * 1024, h.all_logs());
+    }
+
+    {
+        Harness h("ev5",
+                  "events.on('frame', function() ('a'):rep(40):find(('a*'):rep(12) .. 'b') end)\n"
+                  "events.on('frame', function() print('after pattern bomb') end)\n");
+        h.sb->load_main();
+        const bool r1 = h.sb->dispatch("frame");
+        const bool survived_first = !h.sb->is_dead() && h.logged("after pattern bomb");
+        h.sb->dispatch("frame");
+        h.sb->dispatch("frame");
+        check("pattern-bomb handler: contained, later handlers run, mod disabled after 3 strikes",
+              !r1 && survived_first && h.sb->is_dead(), h.all_logs());
     }
 
     std::cout << "== isolation between mods ==\n";
