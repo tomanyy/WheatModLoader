@@ -60,7 +60,7 @@ target_link_libraries(mod_host PUBLIC lua_sandbox)
 
 if(MINGW)
   configure_file(loader/proxy/${wheatProxy}Exports.inc ${CMAKE_BINARY_DIR}/gen/proxyExports.inc COPYONLY)
-  add_library(loaderProxy SHARED loader/proxyMain.cpp loader/proxy/${wheatProxy}.def)
+  add_library(loaderProxy SHARED loader/proxyMain.cpp loader/frameHook.cpp loader/proxy/${wheatProxy}.def)
   target_include_directories(loaderProxy PRIVATE ${CMAKE_BINARY_DIR}/gen)
   set_target_properties(loaderProxy PROPERTIES OUTPUT_NAME ${wheatProxy} PREFIX "")
   target_link_libraries(loaderProxy PRIVATE mod_host)

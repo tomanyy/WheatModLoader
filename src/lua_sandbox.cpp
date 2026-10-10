@@ -28,6 +28,7 @@ constexpr int kHookStride                    = 128;        // VM instructions be
 constexpr std::size_t kMaxSourceBytes        = 1 << 20;    // 1 MiB per script file
 constexpr std::size_t kMaxHandlersPerEvent   = 32;
 constexpr std::size_t kMaxLogLine            = 4096;
+constexpr int kStrikeDecayDispatches         = 1000;
 constexpr const char* kLoadedKey             = "modloader.loaded";
 constexpr const char* kHandlersKey           = "modloader.handlers";
 constexpr const char* kEnvKey                = "modloader.env";
@@ -53,6 +54,7 @@ struct SandboxImpl {
     std::chrono::steady_clock::time_point deadline{};
 
     int strikes = 0;
+    int cleanDispatches = 0;
     bool dead = false;
     bool env_built = false;
 
@@ -564,6 +566,12 @@ bool ModSandbox::dispatch(const std::string& event, const std::vector<EventArg>&
         }
     }
     lua_settop(L, top);
+    if (!all_ok) {
+        im.cleanDispatches = 0;
+    } else if (im.strikes > 0 && ++im.cleanDispatches >= kStrikeDecayDispatches) {
+        im.strikes = 0;
+        im.cleanDispatches = 0;
+    }
     return all_ok;
 }
 

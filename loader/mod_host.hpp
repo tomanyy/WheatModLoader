@@ -37,7 +37,7 @@ public:
     std::size_t load_all();
 
     // Sends an event to every running mod. Returns how many mods had a handler fail.
-    // Events available to mods: "mods_loaded", "tick" (see kHostEvents in mod_host.cpp).
+    // Events available to mods: "mods_loaded", "frame" (see kHostEvents in mod_host.cpp).
     std::size_t dispatch(const std::string& event, const std::vector<EventArg>& args = {});
 
     std::size_t running() const;                 // mods that are loaded and not disabled

@@ -7,9 +7,12 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 
+#include "frameHook.hpp"
 #include "insecure_gate.hpp"
 #include "mod_host.hpp"
 #include "proxyExports.inc"
@@ -23,6 +26,8 @@ void* gReal[WHEAT_PROXY_COUNT] = {};
 
 static std::wstring gGameDir;
 static std::atomic<bool> gStop{false};
+static std::mutex gHostMutex;
+static ModHost* gHost = nullptr;
 
 static bool loadRealDll() {
     wchar_t dir[MAX_PATH];
@@ -76,6 +81,7 @@ public:
     }
 
     void write(std::string_view mod, LogLevel level, std::string_view msg) {
+        std::lock_guard<std::mutex> lock(mutex);
         if (!out || full) return;
         static const char* const levelNames[] = {"INFO ", "WARN ", "ERROR"};
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
@@ -93,12 +99,38 @@ public:
 
 private:
     static constexpr std::size_t maxBytes = 8u << 20;
+    std::mutex mutex;
     std::ofstream out;
     std::chrono::steady_clock::time_point start;
     std::size_t bytes = 0;
     bool full = false;
 };
 }  // namespace
+
+static void dispatchFrame(double dt, std::uint64_t number) {
+    std::unique_lock<std::mutex> lock(gHostMutex, std::try_to_lock);
+    if (!lock.owns_lock() || !gHost) return;
+    gHost->dispatch("frame", {EventArg{dt}, EventArg{static_cast<std::int64_t>(number)}});
+}
+
+static bool waitForModule(const wchar_t* name, int timeoutMs) {
+    for (int waited = 0; waited < timeoutMs && !gStop.load(); waited += 250) {
+        if (GetModuleHandleW(name)) return true;
+        Sleep(250);
+    }
+    return false;
+}
+
+struct HostPublisher {
+    explicit HostPublisher(ModHost* host) {
+        std::lock_guard<std::mutex> lock(gHostMutex);
+        gHost = host;
+    }
+    ~HostPublisher() {
+        std::lock_guard<std::mutex> lock(gHostMutex);
+        gHost = nullptr;
+    }
+};
 
 static DWORD WINAPI workerMain(LPVOID) {
     try {
@@ -112,21 +144,48 @@ static DWORD WINAPI workerMain(LPVOID) {
 
         ModHostConfig config;
         config.mods_dir = base / L"mods";
-        config.limits.event_wall_ms = 50;
+        config.limits.event_wall_ms = 20;
+        config.limits.event_instructions = 200'000;
         config.log = [&log](std::string_view mod, LogLevel level, std::string_view msg) { log.write(mod, level, msg); };
         ModHost host(std::move(config));
 
-        const std::size_t running = host.load_all();
-        log.write("host", LogLevel::Info, std::to_string(running) + " mod(s) running");
-        host.dispatch("mods_loaded");
+        {
+            std::lock_guard<std::mutex> lock(gHostMutex);
+            const std::size_t running = host.load_all();
+            log.write("host", LogLevel::Info, std::to_string(running) + " mod(s) running");
+            host.dispatch("mods_loaded");
+        }
+        HostPublisher publisher(&host);
 
-        auto last = std::chrono::steady_clock::now();
-        while (!gStop.load()) {
-            Sleep(100);
-            const auto now = std::chrono::steady_clock::now();
-            const double dt = std::chrono::duration<double>(now - last).count();
-            last = now;
-            host.dispatch("tick", {EventArg{dt}});
+        bool hooked = false;
+        if (waitForModule(L"rendersystemdx11.dll", 180000)) {
+            Sleep(3000);
+            std::string error;
+            hooked = frameHook::install(dispatchFrame, error);
+            if (hooked) {
+                log.write("host", LogLevel::Info, error.empty() ? "frame hook installed (IDXGISwapChain::Present)" : "frame hook installed with warning: " + error);
+            } else {
+                log.write("host", LogLevel::Error, "frame hook failed: " + error + "; falling back to a 10 Hz timer");
+            }
+        } else if (!gStop.load()) {
+            log.write("host", LogLevel::Warn, "rendersystemdx11.dll never loaded; falling back to a 10 Hz timer");
+        }
+
+        if (hooked) {
+            for (int waited = 0; waited < 60000 && !gStop.load() && frameHook::framesSeen() == 0; waited += 250) Sleep(250);
+            log.write("host", frameHook::framesSeen() ? LogLevel::Info : LogLevel::Warn,
+                      frameHook::framesSeen() ? "first frame seen" : "no frames seen 60 s after installing the hook");
+            while (!gStop.load()) Sleep(250);
+        } else {
+            auto last = std::chrono::steady_clock::now();
+            std::uint64_t number = 0;
+            while (!gStop.load()) {
+                Sleep(100);
+                const auto now = std::chrono::steady_clock::now();
+                const double dt = std::chrono::duration<double>(now - last).count();
+                last = now;
+                dispatchFrame(dt, ++number);
+            }
         }
         log.write("host", LogLevel::Info, "wheat loader stopping");
     } catch (const std::exception& e) {
@@ -147,6 +206,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
         }
     } else if (reason == DLL_PROCESS_DETACH) {
         gStop.store(true);
+        frameHook::stop();
     }
     return TRUE;
 }

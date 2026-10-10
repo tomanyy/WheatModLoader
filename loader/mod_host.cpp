@@ -13,7 +13,7 @@ namespace modloader {
 
 namespace {
 
-constexpr const char* kHostEvents[] = {"mods_loaded", "tick"};
+constexpr const char* kHostEvents[] = {"mods_loaded", "frame"};
 
 struct LogLimiter {
     steady::time_point window{};
