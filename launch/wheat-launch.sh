@@ -12,10 +12,11 @@ done
 
 if [ "$hasInsecure" -eq 1 ] && [ "$hasSecure" -eq 0 ]; then
   export WINEDLLOVERRIDES="winmm=n,b${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
-  echo "[wheat] -insecure detected: mod loader enabled." >&2
+  decision="ENABLED"
 else
-  echo "[wheat] -insecure NOT present: starting the game WITHOUT the mod loader." >&2
+  decision="DISABLED (insecure=$hasInsecure secure=$hasSecure)"
 fi
 
-echo "[$(date +%T)] override=${WINEDLLOVERRIDES-unset}" >> "$HOME/wheatLaunch.log"
+echo "[wheat] loader $decision" >&2
+echo "[$(date +%T)] $decision override=${WINEDLLOVERRIDES-unset}" >> "$HOME/wheatLaunch.log"
 exec "$@"
