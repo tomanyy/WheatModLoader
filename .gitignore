@@ -67,3 +67,4 @@ vcpkg_installed/
 Testing/
 .cache/
 build/
+build-win/
