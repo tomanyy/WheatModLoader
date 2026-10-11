@@ -105,7 +105,7 @@ private:
     std::size_t bytes = 0;
     bool full = false;
 };
-}  // namespace
+}
 
 static void dispatchFrame(double dt, std::uint64_t number) {
     std::unique_lock<std::mutex> lock(gHostMutex, std::try_to_lock);

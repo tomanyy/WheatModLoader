@@ -49,4 +49,4 @@ private:
     std::unique_ptr<detail::SandboxImpl> impl_;
 };
 
-}  // namespace modloader
+}

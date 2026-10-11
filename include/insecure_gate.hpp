@@ -48,4 +48,4 @@ inline GateResult check_launch_gate(std::wstring_view command_line) {
     return insecure ? GateResult::Allowed : GateResult::MissingInsecure;
 }
 
-}  // namespace modloader
+}

@@ -42,7 +42,7 @@ int wheat_now(lua_State* L) {
     return 1;
 }
 
-}  // namespace
+}
 
 struct ModHost::Impl {
     ModHostConfig cfg;
@@ -182,4 +182,4 @@ std::vector<std::string> ModHost::mod_names() const {
     return v;
 }
 
-}  // namespace modloader
+}

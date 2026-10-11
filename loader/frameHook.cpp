@@ -162,7 +162,7 @@ bool readVtables(Vtables& out, std::string& error) {
     return ok;
 }
 
-}  // namespace
+}
 
 namespace frameHook {
 
@@ -185,4 +185,4 @@ void stop() { gStopped.store(true); }
 
 std::uint64_t framesSeen() { return gFrames.load(); }
 
-}  // namespace frameHook
+}

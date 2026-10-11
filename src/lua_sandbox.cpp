@@ -77,7 +77,6 @@ static SandboxImpl* impl_of(lua_State* L) {
     return *static_cast<SandboxImpl**>(lua_getextraspace(L));
 }
 
-// ---------------------------------------------------------------- memory cap
 
 static void* limited_alloc(void* ud, void* ptr, std::size_t osize, std::size_t nsize) {
     auto* im = static_cast<SandboxImpl*>(ud);
@@ -94,7 +93,6 @@ static void* limited_alloc(void* ud, void* ptr, std::size_t osize, std::size_t n
     return n;
 }
 
-// ---------------------------------------------------------- instruction cap
 
 static void budget_hook(lua_State* L, lua_Debug*) {
     SandboxImpl* im = impl_of(L);
@@ -173,7 +171,6 @@ void SandboxImpl::strike(int rc) {
     }
 }
 
-// ------------------------------------------------------------ file helpers
 
 // Resolves rel inside root (following symlinks) and reads it. Never raises Lua errors.
 static bool read_source(const fs::path& root, const fs::path& rel, std::string& out, const char*& err) {
@@ -208,7 +205,6 @@ static bool push_chunk(lua_State* L, SandboxImpl* im, const fs::path& rel, const
     return true;
 }
 
-// ------------------------------------------------------- sandbox functions
 
 static int sb_print(lua_State* L) {
     const int n = lua_gettop(L);
@@ -274,8 +270,8 @@ static int sb_require(lua_State* L) {
     const char* name = luaL_checkstring(L, 1);
     if (!valid_module_name(name)) return luaL_error(L, "invalid module name");
 
-    lua_getfield(L, LUA_REGISTRYINDEX, kLoadedKey);  // idx 2
-    lua_getfield(L, 2, name);                        // idx 3
+    lua_getfield(L, LUA_REGISTRYINDEX, kLoadedKey);
+    lua_getfield(L, 2, name);
     if (lua_touserdata(L, 3) == &kLoadingSentinel) return luaL_error(L, "circular require of '%s'", name);
     if (!lua_isnil(L, 3)) return 1;
     lua_pop(L, 1);
@@ -338,8 +334,8 @@ static int ro_newindex(lua_State* L) { return luaL_error(L, "attempt to modify a
 // This is a guard against accidents, NOT a security boundary (rawset bypasses it).
 // The boundary is the separate lua_State per mod.
 static void make_readonly(lua_State* L) {
-    lua_newtable(L);  // proxy
-    lua_newtable(L);  // metatable
+    lua_newtable(L);
+    lua_newtable(L);
     lua_pushvalue(L, -3);
     lua_setfield(L, -2, "__index");
     lua_pushcfunction(L, ro_newindex);
@@ -350,7 +346,6 @@ static void make_readonly(lua_State* L) {
     lua_remove(L, -2);
 }
 
-// --------------------------------------------------------------- env setup
 
 static int open_libs(lua_State* L) {
     // Deliberately NOT luaL_openlibs: io, os, package and debug are never opened.
@@ -461,7 +456,6 @@ static void push_arg(lua_State* L, const EventArg& a) {
 
 }  // namespace modloader::detail
 
-// ===================================================================== public
 
 namespace modloader {
 using namespace detail;
