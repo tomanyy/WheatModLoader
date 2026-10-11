@@ -1,7 +1,11 @@
 # Wheat Mod Loader
 **A mod loader for Counter-Strike 2 which uses Lua 5.4**
+> [!CAUTION]  
+> Wheat Mod Loader is currently unstable and still in development
+
 > [!NOTE]  
 > Wheat Mod Loader will **not** get you VAC banned as it forcefully uses `-insecure` (launch argument that disables VAC) everytime you launch CS2 with WML.
+> (game launch subject to change)
 
 > [!WARNING]  
 > WML doesn't support any projects that try to bypass/delete the `-insecure` check of the program.
