@@ -1,14 +1,4 @@
 # Wheat Mod Loader
-<<<<<<< HEAD
-**A mod loader for Counter-Strike 2 which uses Lua 5.4**
-> [!CAUTION]  
-> **Wheat Mod Loader shouldn't be used as of right now.** It's currently in very early development and is very unstable 
-
-> [!NOTE]  
-> Wheat Mod Loader will **not** get you VAC banned as it forcefully uses `-insecure` (launch argument that disables VAC) everytime you launch CS2 with WML.
-=======
->>>>>>> 31083d9 (Update README.md)
-
 Wheat Mod Loader (WML) is an experimental Lua 5.4 mod loader for Counter-Strike 2. On Windows, it loads through a `winmm.dll` proxy, hosts Lua mods in separate restricted sandboxes, and dispatches `mods_loaded` and `frame` events.
 
 > [!WARNING]
