@@ -1,10 +1,4 @@
 #pragma once
-// Layer 2 of the gate: the loader DLL checks its OWN command line (GetCommandLineW())
-// before doing anything else. Fail-closed: anything unclear means "refuse".
-//
-//  * only an unquoted, whole-token "-insecure" (case-insensitive) counts as the flag
-//  * a quoted token never counts as the flag (so  -x "-insecure"  is refused)
-//  * any "-secure" token, quoted or not, vetoes the launch
 #include <string>
 #include <string_view>
 #include <vector>
