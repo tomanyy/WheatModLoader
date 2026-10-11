@@ -1,6 +1,5 @@
 #pragma once
 #include "lua_sandbox.hpp"
-
 #include <cstddef>
 #include <filesystem>
 #include <memory>
