@@ -92,11 +92,3 @@ WML is experimental. The loader currently exposes only the small `wheat` API lis
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance. Changes must preserve the `-insecure` launch gate and must not attempt to bypass it.
-
-## License
-<<<<<<< HEAD
-GPL-3.0 license
-=======
-
-Wheat Mod Loader is distributed under the GNU General Public License v3.0. See [LICENSE](LICENSE).
->>>>>>> 31083d9 (Update README.md)
