@@ -29,6 +29,11 @@ constexpr std::size_t kMaxSourceBytes        = 1 << 20;    // 1 MiB per script f
 constexpr std::size_t kMaxHandlersPerEvent   = 32;
 constexpr std::size_t kMaxLogLine            = 4096;
 constexpr int kStrikeDecayDispatches         = 1000;
+constexpr std::size_t kHostHeadroom          = 512 * 1024;
+constexpr int kMaxTimers                     = 64;
+constexpr double kMinRepeatSeconds           = 0.05;
+constexpr double kMaxTimerSeconds            = 86400.0;
+constexpr const char* kTimersKey             = "modloader.timers";
 constexpr const char* kLoadedKey             = "modloader.loaded";
 constexpr const char* kHandlersKey           = "modloader.handlers";
 constexpr const char* kEnvKey                = "modloader.env";
@@ -55,6 +60,9 @@ struct SandboxImpl {
 
     int strikes = 0;
     int cleanDispatches = 0;
+    bool inCall = false;
+    lua_Integer nextTimerId = 0;
+    int timerCount = 0;
     bool dead = false;
     bool env_built = false;
 
@@ -77,6 +85,7 @@ static SandboxImpl* impl_of(lua_State* L) {
     return *static_cast<SandboxImpl**>(lua_getextraspace(L));
 }
 
+// ---------------------------------------------------------------- memory cap
 
 static void* limited_alloc(void* ud, void* ptr, std::size_t osize, std::size_t nsize) {
     auto* im = static_cast<SandboxImpl*>(ud);
@@ -86,13 +95,15 @@ static void* limited_alloc(void* ud, void* ptr, std::size_t osize, std::size_t n
         return nullptr;
     }
     const std::size_t old = ptr ? osize : 0;  // when ptr==NULL, osize is a type tag, not a size
-    if (nsize > old && (im->mem_used - old) + nsize > im->limits.memory_bytes) return nullptr;
+    const std::size_t cap = im->limits.memory_bytes + (im->inCall ? 0 : kHostHeadroom);
+    if (nsize > old && (im->mem_used - old) + nsize > cap) return nullptr;
     void* n = std::realloc(ptr, nsize);
     if (!n) return (nsize <= old) ? ptr : nullptr;  // shrinking must never fail
     im->mem_used = (im->mem_used - old) + nsize;
     return n;
 }
 
+// ---------------------------------------------------------- instruction cap
 
 static void budget_hook(lua_State* L, lua_Debug*) {
     SandboxImpl* im = impl_of(L);
@@ -157,7 +168,9 @@ int SandboxImpl::guarded_pcall(int nargs, int nres, std::uint64_t instruction_bu
     tripped = false;
     deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wall_ms);
     lua_sethook(L, budget_hook, LUA_MASKCOUNT, kHookStride);
+    inCall = true;
     const int rc = lua_pcall(L, nargs, nres, base);
+    inCall = false;
     lua_sethook(L, nullptr, 0, 0);
     lua_remove(L, base);
     return rc;
@@ -171,6 +184,7 @@ void SandboxImpl::strike(int rc) {
     }
 }
 
+// ------------------------------------------------------------ file helpers
 
 // Resolves rel inside root (following symlinks) and reads it. Never raises Lua errors.
 static bool read_source(const fs::path& root, const fs::path& rel, std::string& out, const char*& err) {
@@ -205,6 +219,7 @@ static bool push_chunk(lua_State* L, SandboxImpl* im, const fs::path& rel, const
     return true;
 }
 
+// ------------------------------------------------------- sandbox functions
 
 static int sb_print(lua_State* L) {
     const int n = lua_gettop(L);
@@ -270,8 +285,8 @@ static int sb_require(lua_State* L) {
     const char* name = luaL_checkstring(L, 1);
     if (!valid_module_name(name)) return luaL_error(L, "invalid module name");
 
-    lua_getfield(L, LUA_REGISTRYINDEX, kLoadedKey);
-    lua_getfield(L, 2, name);
+    lua_getfield(L, LUA_REGISTRYINDEX, kLoadedKey);  // idx 2
+    lua_getfield(L, 2, name);                        // idx 3
     if (lua_touserdata(L, 3) == &kLoadingSentinel) return luaL_error(L, "circular require of '%s'", name);
     if (!lua_isnil(L, 3)) return 1;
     lua_pop(L, 1);
@@ -328,14 +343,61 @@ static int sb_events_on(lua_State* L) {
     return 0;
 }
 
+static double nowSeconds() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static int timerCreate(lua_State* L, bool repeating) {
+    const lua_Number delay = luaL_checknumber(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+    if (!(delay >= (repeating ? kMinRepeatSeconds : 0.0)) || delay > kMaxTimerSeconds)
+        return luaL_error(L, "invalid timer delay");
+    SandboxImpl* im = impl_of(L);
+    if (im->timerCount >= kMaxTimers) return luaL_error(L, "too many timers");
+
+    lua_getfield(L, LUA_REGISTRYINDEX, kTimersKey);
+    const lua_Integer id = ++im->nextTimerId;
+    lua_createtable(L, 0, 3);
+    lua_pushvalue(L, 2);
+    lua_setfield(L, -2, "fn");
+    lua_pushnumber(L, nowSeconds() + delay);
+    lua_setfield(L, -2, "due");
+    if (repeating) {
+        lua_pushnumber(L, delay);
+        lua_setfield(L, -2, "interval");
+    }
+    lua_rawseti(L, -2, id);
+    ++im->timerCount;
+    lua_pushinteger(L, id);
+    return 1;
+}
+
+static int sb_timers_after(lua_State* L) { return timerCreate(L, false); }
+static int sb_timers_every(lua_State* L) { return timerCreate(L, true); }
+
+static int sb_timers_cancel(lua_State* L) {
+    const lua_Integer id = luaL_checkinteger(L, 1);
+    lua_getfield(L, LUA_REGISTRYINDEX, kTimersKey);
+    lua_rawgeti(L, -1, id);
+    const bool existed = !lua_isnil(L, -1);
+    lua_pop(L, 1);
+    if (existed) {
+        lua_pushnil(L);
+        lua_rawseti(L, -2, id);
+        --impl_of(L)->timerCount;
+    }
+    lua_pushboolean(L, existed);
+    return 1;
+}
+
 static int ro_newindex(lua_State* L) { return luaL_error(L, "attempt to modify a read-only table"); }
 
 // Replaces the table on top of the stack with a read-only proxy.
 // This is a guard against accidents, NOT a security boundary (rawset bypasses it).
 // The boundary is the separate lua_State per mod.
 static void make_readonly(lua_State* L) {
-    lua_newtable(L);
-    lua_newtable(L);
+    lua_newtable(L);  // proxy
+    lua_newtable(L);  // metatable
     lua_pushvalue(L, -3);
     lua_setfield(L, -2, "__index");
     lua_pushcfunction(L, ro_newindex);
@@ -346,6 +408,7 @@ static void make_readonly(lua_State* L) {
     lua_remove(L, -2);
 }
 
+// --------------------------------------------------------------- env setup
 
 static int open_libs(lua_State* L) {
     // Deliberately NOT luaL_openlibs: io, os, package and debug are never opened.
@@ -376,6 +439,8 @@ static int open_libs(lua_State* L) {
     lua_setfield(L, LUA_REGISTRYINDEX, kLoadedKey);
     lua_newtable(L);
     lua_setfield(L, LUA_REGISTRYINDEX, kHandlersKey);
+    lua_newtable(L);
+    lua_setfield(L, LUA_REGISTRYINDEX, kTimersKey);
     return 0;
 }
 
@@ -423,6 +488,16 @@ void SandboxImpl::build_env() {
     make_readonly(L);
     lua_setfield(L, env, "events");
 
+    lua_newtable(L);
+    lua_pushcfunction(L, sb_timers_after);
+    lua_setfield(L, -2, "after");
+    lua_pushcfunction(L, sb_timers_every);
+    lua_setfield(L, -2, "every");
+    lua_pushcfunction(L, sb_timers_cancel);
+    lua_setfield(L, -2, "cancel");
+    make_readonly(L);
+    lua_setfield(L, env, "timers");
+
     for (const auto& [api_name, builder] : apis) {
         lua_newtable(L);
         const int tbl = lua_gettop(L);
@@ -454,8 +529,20 @@ static void push_arg(lua_State* L, const EventArg& a) {
         a);
 }
 
+// Stack on entry: 1 = handler, 2 = lightuserdata -> const std::vector<EventArg>*.
+// Running inside lua_pcall means an out-of-memory while pushing arguments is caught, not fatal.
+static int invokeHandler(lua_State* L) {
+    const auto* args = static_cast<const std::vector<EventArg>*>(lua_touserdata(L, 2));
+    lua_settop(L, 1);
+    luaL_checkstack(L, static_cast<int>(args->size()) + 4, "too many event arguments");
+    for (const auto& a : *args) push_arg(L, a);
+    lua_call(L, static_cast<int>(args->size()), 0);
+    return 0;
+}
+
 }  // namespace modloader::detail
 
+// ===================================================================== public
 
 namespace modloader {
 using namespace detail;
@@ -536,7 +623,7 @@ bool ModSandbox::dispatch(const std::string& event, const std::vector<EventArg>&
     if (im.dead || !im.env_built) return false;
 
     const int top = lua_gettop(L);
-    if (!lua_checkstack(L, static_cast<int>(args.size()) + 8)) return false;
+    if (!lua_checkstack(L, 8)) return false;
 
     lua_getfield(L, LUA_REGISTRYINDEX, kHandlersKey);
     lua_getfield(L, -1, event.c_str());
@@ -549,9 +636,10 @@ bool ModSandbox::dispatch(const std::string& event, const std::vector<EventArg>&
 
     bool all_ok = true;
     for (lua_Unsigned i = 1; i <= n && !im.dead; ++i) {
+        lua_pushcfunction(L, invokeHandler);
         lua_rawgeti(L, handlers, static_cast<lua_Integer>(i));
-        for (const auto& a : args) push_arg(L, a);
-        const int rc = im.guarded_pcall(static_cast<int>(args.size()), 0, im.limits.event_instructions, im.limits.event_wall_ms);
+        lua_pushlightuserdata(L, const_cast<std::vector<EventArg>*>(&args));
+        const int rc = im.guarded_pcall(2, 0, im.limits.event_instructions, im.limits.event_wall_ms);
         if (rc != LUA_OK) {
             all_ok = false;
             im.emit(LogLevel::Error, lua_tostring(L, -1) ? lua_tostring(L, -1) : "unknown error");
@@ -567,6 +655,60 @@ bool ModSandbox::dispatch(const std::string& event, const std::vector<EventArg>&
         im.cleanDispatches = 0;
     }
     return all_ok;
+}
+
+std::size_t ModSandbox::runTimers() {
+    auto& im = *impl_;
+    lua_State* L = im.L;
+    if (im.dead || !im.env_built || im.timerCount == 0 || !lua_checkstack(L, 8)) return 0;
+
+    const double now = nowSeconds();
+    const int top = lua_gettop(L);
+    lua_getfield(L, LUA_REGISTRYINDEX, kTimersKey);
+    const int timers = lua_gettop(L);
+
+    lua_Integer dueIds[kMaxTimers];
+    int dueCount = 0;
+    lua_pushnil(L);
+    while (lua_next(L, timers) != 0) {
+        lua_getfield(L, -1, "due");
+        const double due = lua_tonumber(L, -1);
+        lua_pop(L, 2);
+        if (due <= now && dueCount < kMaxTimers) dueIds[dueCount++] = lua_tointeger(L, -1);
+    }
+
+    std::size_t failed = 0;
+    for (int i = 0; i < dueCount && !im.dead; ++i) {
+        lua_rawgeti(L, timers, dueIds[i]);
+        if (!lua_istable(L, -1)) {
+            lua_pop(L, 1);
+            continue;
+        }
+        lua_getfield(L, -1, "interval");
+        const bool repeating = lua_isnumber(L, -1) != 0;
+        const double interval = repeating ? lua_tonumber(L, -1) : 0.0;
+        lua_pop(L, 1);
+        lua_getfield(L, -1, "fn");
+        if (repeating) {
+            lua_pushnumber(L, now + interval);
+            lua_setfield(L, -3, "due");
+        } else {
+            lua_pushnil(L);
+            lua_rawseti(L, timers, dueIds[i]);
+            --im.timerCount;
+        }
+        lua_remove(L, -2);
+
+        const int rc = im.guarded_pcall(0, 0, im.limits.event_instructions, im.limits.event_wall_ms);
+        if (rc != LUA_OK) {
+            ++failed;
+            im.emit(LogLevel::Error, lua_tostring(L, -1) ? lua_tostring(L, -1) : "unknown error");
+            lua_pop(L, 1);
+            im.strike(rc);
+        }
+    }
+    lua_settop(L, top);
+    return failed;
 }
 
 std::size_t ModSandbox::memory_used() const { return impl_->mem_used; }

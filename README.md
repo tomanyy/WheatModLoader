@@ -17,7 +17,7 @@ Wheat Mod Loader (WML) is an experimental Lua 5.4 mod loader for Counter-Strike 
 - Per-mod log rate limiting and deterministic mod loading order.
 - `mods_loaded` and `frame` events. The frame event provides elapsed seconds and a frame number.
 - A small built-in `wheat` Lua API: `api_version`, `mod_name`, and monotonic `now()`.
-- A Windows `winmm.dll` proxy that forwards exports to the system DLL and only activates in `cs2.exe` when the insecure launch gate passes.
+- A Windows PE `winmm.dll` proxy and a Linux ELF preload library (also named `winmm.dll`); each activates only in CS2 when the insecure launch gate passes.
 - A Wine launch helper that sets the `winmm` DLL override when `-insecure` is supplied.
 
 ## Install a release
@@ -38,6 +38,14 @@ Mod folder names may contain letters, digits, `_`, and `-`, up to 64 characters.
 
 ## Build from source
 
+On Linux, install CMake, a C/C++ compiler, and MinGW-w64, then build both platform runtimes with one command:
+
+```sh
+./build-all.sh
+```
+
+This writes `build-linux/wheatLinux.dll` and `build-win/wheatWindows.dll`. The Windows artifact is cross-compiled; the script needs `x86_64-w64-mingw32-g++` available in `PATH`.
+
 ### Requirements
 
 - CMake 3.20 or newer.
@@ -55,18 +63,18 @@ cmake -S . -B build -G "MinGW Makefiles" -DwheatVendorLua=ON
 cmake --build build --config Release
 ```
 
-The proxy DLL is produced as `build/winmm.dll`. Place it in the game's `game/bin/win64` directory (alongside the game executable's runtime files), then launch with `-insecure`.
+The Windows proxy is produced as `build/wheatWindows.dll`. The launcher renames it to `winmm.dll` when installing it into a Wheat installation. Launch with `-insecure`.
 
-### Linux / sandbox libraries
+### Linux preload library
 
-On Linux, CMake builds the reusable Lua sandbox and mod-host static libraries; the Windows proxy target is only built for MinGW. With Lua 5.4 development files installed, configure and build using:
+On Linux, build the native preload library using vendored Lua so the Steam runtime does not need a separate Lua shared library:
 
 ```sh
-cmake -S . -B build -DwheatVendorLua=OFF
-cmake --build build
+cmake -S . -B build-linux -DwheatVendorLua=ON
+cmake --build build-linux
 ```
 
-Set `-DwheatVendorLua=ON` to have CMake fetch and build Lua 5.4.8 instead. For cross-compiling to Windows, see [`cmake/mingw-w64-x86_64.cmake`](cmake/mingw-w64-x86_64.cmake); set `CMAKE_TOOLCHAIN_FILE` to that file when configuring.
+The output is an ELF shared object named `build-linux/wheatLinux.dll`. The launcher renames it to `winmm.dll` when installing it into a Wheat installation. It runs Lua mods and frame callbacks on a 10 Hz timer; the Windows D3D11 hook and engine-console reader are not available in this Linux runtime. For cross-compiling to Windows, see [`cmake/mingw-w64-x86_64.cmake`](cmake/mingw-w64-x86_64.cmake).
 
 ## Wine launch helper
 

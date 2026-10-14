@@ -15,7 +15,7 @@ foreach(file ${luaFiles})
 endforeach()
 
 add_library(lua54Vendored STATIC ${luaSources})
-set_target_properties(lua54Vendored PROPERTIES C_STANDARD 99 LINKER_LANGUAGE C)
+set_target_properties(lua54Vendored PROPERTIES C_STANDARD 99 LINKER_LANGUAGE C POSITION_INDEPENDENT_CODE ON)
 target_include_directories(lua54Vendored PUBLIC
   ${luasrc_SOURCE_DIR} ${CMAKE_CURRENT_LIST_DIR}/../third_party/lua_vendor)
 set(luaTarget lua54Vendored)

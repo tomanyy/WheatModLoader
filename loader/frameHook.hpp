@@ -10,4 +10,4 @@ bool install(Callback callback, std::string& error);
 void stop();
 std::uint64_t framesSeen();
 
-}
+}  // namespace frameHook

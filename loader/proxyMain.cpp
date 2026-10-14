@@ -9,9 +9,11 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <string_view>
 
+#include "engineConsole.hpp"
 #include "frameHook.hpp"
 #include "insecure_gate.hpp"
 #include "mod_host.hpp"
@@ -105,12 +107,12 @@ private:
     std::size_t bytes = 0;
     bool full = false;
 };
-}
+}  // namespace
 
 static void dispatchFrame(double dt, std::uint64_t number) {
     std::unique_lock<std::mutex> lock(gHostMutex, std::try_to_lock);
     if (!lock.owns_lock() || !gHost) return;
-    gHost->dispatch("frame", {EventArg{dt}, EventArg{static_cast<std::int64_t>(number)}});
+    gHost->frame(dt, static_cast<std::int64_t>(number));
 }
 
 static bool waitForModule(const wchar_t* name, int timeoutMs) {
@@ -132,6 +134,12 @@ struct HostPublisher {
     }
 };
 
+static void initializeConsole(EngineConsole& console, const fs::path& base, FileLog& log) {
+    const bool enabled = console.initialize(base);
+    log.write("host", enabled ? LogLevel::Info : LogLevel::Warn,
+              enabled ? "console API enabled (read-only); details in consoleReport.txt" : "console API off; see consoleReport.txt");
+}
+
 static DWORD WINAPI workerMain(LPVOID) {
     try {
         const fs::path base = fs::path(gGameDir) / L"wheat";
@@ -142,19 +150,29 @@ static DWORD WINAPI workerMain(LPVOID) {
         log.open(base / L"loader.log");
         log.write("host", LogLevel::Info, "wheat loader started (cs2.exe, -insecure confirmed)");
 
+        auto engineConsole = std::make_shared<EngineConsole>();
+
         ModHostConfig config;
+        config.console = engineConsole;
         config.mods_dir = base / L"mods";
+        const fs::path allowFile = base / L"apiAllowList.txt";
+        if (fs::exists(allowFile)) {
+            config.enforce_api_allow_list = true;
+            std::ifstream allowInput(allowFile);
+            std::string apiName;
+            while (std::getline(allowInput, apiName)) {
+                if (!apiName.empty() && apiName.size() <= 64 && apiName.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._") == std::string::npos)
+                    config.api_allow_list.insert(apiName);
+            }
+        }
         config.limits.event_wall_ms = 20;
         config.limits.event_instructions = 200'000;
         config.log = [&log](std::string_view mod, LogLevel level, std::string_view msg) { log.write(mod, level, msg); };
         ModHost host(std::move(config));
 
-        {
-            std::lock_guard<std::mutex> lock(gHostMutex);
-            const std::size_t running = host.load_all();
-            log.write("host", LogLevel::Info, std::to_string(running) + " mod(s) running");
-            host.dispatch("mods_loaded");
-        }
+        const std::size_t running = host.load_all();
+        log.write("host", LogLevel::Info, std::to_string(running) + " mod(s) running");
+        host.dispatch("mods_loaded");
         HostPublisher publisher(&host);
 
         bool hooked = false;
@@ -175,12 +193,18 @@ static DWORD WINAPI workerMain(LPVOID) {
             for (int waited = 0; waited < 60000 && !gStop.load() && frameHook::framesSeen() == 0; waited += 250) Sleep(250);
             log.write("host", frameHook::framesSeen() ? LogLevel::Info : LogLevel::Warn,
                       frameHook::framesSeen() ? "first frame seen" : "no frames seen 60 s after installing the hook");
-            while (!gStop.load()) Sleep(250);
+            initializeConsole(*engineConsole, base, log);
+            for (unsigned beat = 1; !gStop.load(); ++beat) {
+                Sleep(250);
+                if (beat % 4 == 0) host.refresh();
+            }
         } else {
+            initializeConsole(*engineConsole, base, log);
             auto last = std::chrono::steady_clock::now();
             std::uint64_t number = 0;
             while (!gStop.load()) {
                 Sleep(100);
+                if (number % 10 == 9) host.refresh();
                 const auto now = std::chrono::steady_clock::now();
                 const double dt = std::chrono::duration<double>(now - last).count();
                 last = now;
