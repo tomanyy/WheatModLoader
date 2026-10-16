@@ -17,7 +17,7 @@ using steady = std::chrono::steady_clock;
 
 #if defined(__linux__)
 void pushImguiApi(lua_State* state, const std::string& name,
-                  const std::set<std::string>& allowed, bool enforce);
+                  const fs::path& modRoot, const std::set<std::string>& allowed, bool enforce);
 #endif
 
 namespace modloader {
@@ -220,14 +220,14 @@ struct ModHost::Impl {
         if (apiAllowed("data")) mod->sandbox->add_api("data", [dataDir](lua_State* L) { pushDataApi(L, dataDir); });
 #if defined(__linux__)
         const std::set<std::string> imguiApis{
-            "imgui.begin", "imgui.text", "imgui.button", "imgui.finish", "imgui.separator", "imgui.same_line"
+            "imgui.begin", "imgui.text", "imgui.button", "imgui.finish", "imgui.separator", "imgui.same_line", "imgui.image"
         };
         if (std::any_of(imguiApis.begin(), imguiApis.end(), apiAllowed)) {
             const auto allowed = cfg.api_allow_list;
             const bool enforce = cfg.enforce_api_allow_list;
             const std::string displayName = manifest.name;
-            mod->sandbox->add_api("imgui", [displayName, allowed, enforce](lua_State* L) {
-                pushImguiApi(L, displayName, allowed, enforce);
+            mod->sandbox->add_api("imgui", [displayName, modRoot = dir, allowed, enforce](lua_State* L) {
+                pushImguiApi(L, displayName, modRoot, allowed, enforce);
             });
         }
 #endif

@@ -61,6 +61,7 @@ target_link_libraries(mod_host PUBLIC lua_sandbox)
 if(UNIX AND NOT APPLE)
   set(imguiDir ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui)
   find_package(PkgConfig REQUIRED)
+  find_package(PNG REQUIRED)
   pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
   set(wheatImGuiSources
     ${imguiDir}/imgui.cpp
@@ -68,7 +69,8 @@ if(UNIX AND NOT APPLE)
     ${imguiDir}/imgui_tables.cpp
     ${imguiDir}/imgui_widgets.cpp)
   target_include_directories(mod_host PUBLIC ${imguiDir})
-  target_sources(mod_host PRIVATE loader/imguiApi.cpp)
+  target_link_libraries(mod_host PUBLIC PNG::PNG PkgConfig::SDL2)
+  target_sources(mod_host PRIVATE loader/imguiApi.cpp loader/imguiImageApi.cpp)
 endif()
 
 if(MINGW)
@@ -88,6 +90,8 @@ elseif(UNIX AND NOT APPLE)
   target_link_libraries(loaderProxy PRIVATE mod_host dl pthread PkgConfig::SDL2)
   add_library(wheatVulkanLayer SHARED loader/vulkanLayerLinux.cpp)
   target_sources(wheatVulkanLayer PRIVATE ${imguiDir}/backends/imgui_impl_vulkan.cpp)
+  set_source_files_properties(${imguiDir}/backends/imgui_impl_vulkan.cpp PROPERTIES
+    COMPILE_DEFINITIONS "VK_NO_PROTOTYPES")
   target_include_directories(wheatVulkanLayer PRIVATE ${Vulkan_INCLUDE_DIRS} ${imguiDir} ${imguiDir}/backends)
   set_target_properties(wheatVulkanLayer PROPERTIES OUTPUT_NAME wheatVulkanLayer PREFIX "lib" SUFFIX ".so")
   target_link_libraries(wheatVulkanLayer PRIVATE dl pthread Vulkan::Vulkan)

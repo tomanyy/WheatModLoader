@@ -108,17 +108,20 @@ events.on("frame", function()
     if imgui.button("Click me") then
         print("button clicked")
     end
+    imgui.image("assets/logo.png", 128, 128)
     imgui.finish()
 end)
 ```
 
-`imgui.begin(title)` defaults to the mod's display name. The API also provides `imgui.separator()` and
-`imgui.same_line()`. SDL2 events feed ImGui input, and mouse or keyboard events are withheld from CS2 while ImGui
+`imgui.begin(title)` defaults to the mod's display name. The API also provides `imgui.separator()`,
+`imgui.same_line()`, and `imgui.image(path, width, height)`. Images are PNG files relative to the mod folder;
+width and height are optional and preserve the image's aspect ratio when only one is supplied. The loader rejects
+paths that escape the mod folder and caps image dimensions and cache size. SDL2 events feed ImGui input, and mouse or keyboard events are withheld from CS2 while ImGui
 requests capture. The Vulkan layer draws only when the present queue supports graphics and a compatible swapchain is
 available. Without the layer or an available rendering context, drawing calls have no visible effect. Each function
 has its own API Allow List entry under the `imgui` category.
 
-Installations can restrict the exposed functions with `wheat/apiAllowList.txt`, one entry per line. The launcher edits this list from an installation's **API Allow List** menu. Supported entries are the four `console.*` functions, `data`, and the six `imgui.*` functions above. A listed console function is omitted from the Lua API when not allowed; omitting `data` removes the complete `data` table. If the file is absent, API functions retain their default exposure, but the engine console backend stays off until the launcher saves an allow list containing at least one `console.*` entry.
+Installations can restrict the exposed functions with `wheat/apiAllowList.txt`, one entry per line. The launcher edits this list from an installation's **API Allow List** menu. Supported entries are the four `console.*` functions, `data`, and the seven `imgui.*` functions above. A listed console function is omitted from the Lua API when not allowed; omitting `data` removes the complete `data` table. If the file is absent, API functions retain their default exposure, but the engine console backend stays off until the launcher saves an allow list containing at least one `console.*` entry.
 
 ## wheat
 

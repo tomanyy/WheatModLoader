@@ -2,6 +2,7 @@
 
 #include <imgui.h>
 #include <lua.hpp>
+#include "imguiImageApi.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -89,7 +90,11 @@ void setImguiFrameActive(bool active) {
     frameActive.store(active, std::memory_order_relaxed);
 }
 
-void pushImguiApi(lua_State* state, const std::string& displayName,
+bool imguiFrameActive() {
+    return frameActive.load(std::memory_order_relaxed);
+}
+
+void pushImguiApi(lua_State* state, const std::string& displayName, const std::filesystem::path& modRoot,
                   const std::set<std::string>& allowed, bool enforce) {
     const auto add = [&](const char* api, const char* field, lua_CFunction function, bool modNameUpvalue = false) {
         if (enforce && !allowed.contains(api)) return;
@@ -103,4 +108,5 @@ void pushImguiApi(lua_State* state, const std::string& displayName,
     add("imgui.finish", "finish", endWindow);
     add("imgui.separator", "separator", separator);
     add("imgui.same_line", "same_line", sameLine);
+    addImguiImageApi(state, modRoot, allowed, enforce);
 }

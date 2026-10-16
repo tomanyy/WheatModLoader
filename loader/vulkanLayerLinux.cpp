@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <dlfcn.h>
 #include <mutex>
 #include <unordered_map>
@@ -23,6 +24,7 @@ struct DeviceState {
     VkDevice device = VK_NULL_HANDLE;
     VkInstance instance = VK_NULL_HANDLE;
     VkPhysicalDevice physical = VK_NULL_HANDLE;
+    PFN_vkGetInstanceProcAddr nextGipa = nullptr;
     PFN_vkGetDeviceProcAddr nextGdpa = nullptr;
     PFN_vkQueuePresentKHR nextPresent = nullptr;
     std::uint32_t queueFamily = UINT32_MAX;
@@ -66,9 +68,20 @@ void setProxyRendererReady(bool ready) {
 }
 
 void reportRendererStatus(const char* status) {
+    static std::atomic<const char*> lastReported{nullptr};
+    if (!status || lastReported.exchange(status, std::memory_order_acq_rel) == status) return;
     using StatusFn = void (*)(const char*);
     static auto report = reinterpret_cast<StatusFn>(dlsym(RTLD_DEFAULT, "wheatSetImGuiRendererStatus"));
     if (report) report(status);
+    using LogFn = void (*)(const char*);
+    static auto log = reinterpret_cast<LogFn>(dlsym(RTLD_DEFAULT, "wheatLogImGuiDiagnostic"));
+    if (log) log(status);
+}
+
+void setProxyDisplaySize(float width, float height) {
+    using DisplaySizeFn = void (*)(float, float);
+    static auto setSize = reinterpret_cast<DisplaySizeFn>(dlsym(RTLD_DEFAULT, "wheatSetImGuiDisplaySize"));
+    if (setSize) setSize(width, height);
 }
 
 struct ProxyGuiLock {
@@ -218,7 +231,7 @@ VkResult VKAPI_CALL layerCreateDevice(VkPhysicalDevice physical, const VkDeviceC
             }
         }
         std::lock_guard<std::mutex> lock(stateMutex);
-        devices[handleKey(*device)] = DeviceState{*device, parent.instance, physical, nextGdpa, nullptr,
+        devices[handleKey(*device)] = DeviceState{*device, parent.instance, physical, parent.nextGipa, nextGdpa, nullptr,
                                                   UINT32_MAX, graphicsFamily, VK_NULL_HANDLE};
     }
     return result;
@@ -260,6 +273,17 @@ Function deviceFunction(const DeviceState& state, const char* name) {
     return state.nextGdpa ? reinterpret_cast<Function>(state.nextGdpa(state.device, name)) : nullptr;
 }
 
+PFN_vkVoidFunction imguiVulkanFunction(const char* name, void* userData) {
+    const auto* device = static_cast<const DeviceState*>(userData);
+    if (!name || !device) return nullptr;
+    const bool instanceFunction = std::strncmp(name, "vkGetPhysicalDevice", 19) == 0 ||
+                                  std::strcmp(name, "vkEnumeratePhysicalDevices") == 0 ||
+                                  std::strcmp(name, "vkDestroySurfaceKHR") == 0;
+    if (instanceFunction)
+        return device->nextGipa ? device->nextGipa(device->instance, name) : nullptr;
+    return device->nextGdpa ? device->nextGdpa(device->device, name) : nullptr;
+}
+
 void destroySwapchainResources(const DeviceState& device, SwapchainState& chain) {
     const auto destroyFramebuffer = deviceFunction<PFN_vkDestroyFramebuffer>(device, "vkDestroyFramebuffer");
     const auto destroyImageView = deviceFunction<PFN_vkDestroyImageView>(device, "vkDestroyImageView");
@@ -287,19 +311,21 @@ void destroySwapchainResources(const DeviceState& device, SwapchainState& chain)
 }
 
 bool initializeSwapchainRenderer(const DeviceState& device, SwapchainState& chain) {
-    using EnsureContextFn = void (*)(float, float);
-    static auto ensureContext = reinterpret_cast<EnsureContextFn>(dlsym(RTLD_DEFAULT, "wheatEnsureImGuiContext"));
-    if (ensureContext) ensureContext(static_cast<float>(chain.extent.width), static_cast<float>(chain.extent.height));
-    else reportRendererStatus("ImGui setup failed: Wheat preload context bridge was not found");
+    const char* enableRenderer = std::getenv("WHEAT_ENABLE_IMGUI_RENDERER");
+    if (!enableRenderer || std::strcmp(enableRenderer, "1") != 0) {
+        reportRendererStatus("ImGui Vulkan renderer is paused; Vulkan mod callbacks remain active");
+        return false;
+    }
     if (imguiBackendReady) return true;
     if (!ImGui::GetCurrentContext()) {
-        reportRendererStatus("ImGui setup failed: no current ImGui context after context bridge call");
+        reportRendererStatus("ImGui setup waiting: no SDL-created ImGui context is available");
         return false;
     }
     if (device.graphicsQueueFamily == UINT32_MAX || !device.graphicsQueue) {
         reportRendererStatus("ImGui setup waiting: no graphics queue was captured");
         return imguiBackendReady;
     }
+    reportRendererStatus("ImGui setup: beginning Vulkan swapchain resource creation");
     const auto getImages = deviceFunction<PFN_vkGetSwapchainImagesKHR>(device, "vkGetSwapchainImagesKHR");
     const auto createImageView = deviceFunction<PFN_vkCreateImageView>(device, "vkCreateImageView");
     const auto createRenderPass = deviceFunction<PFN_vkCreateRenderPass>(device, "vkCreateRenderPass");
@@ -393,7 +419,7 @@ bool initializeSwapchainRenderer(const DeviceState& device, SwapchainState& chai
 
     VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    poolInfo.queueFamilyIndex = device.queueFamily;
+    poolInfo.queueFamilyIndex = device.graphicsQueueFamily;
     if (createCommandPool(chain.device, &poolInfo, nullptr, &chain.commandPool) != VK_SUCCESS) return false;
     chain.commandBuffers.resize(imageCount);
     VkCommandBufferAllocateInfo commandInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -430,6 +456,12 @@ bool initializeSwapchainRenderer(const DeviceState& device, SwapchainState& chai
     init.ImageCount = imageCount;
     init.PipelineInfoMain.RenderPass = chain.renderPass;
     init.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    reportRendererStatus("ImGui setup: creating Vulkan renderer pipeline and device objects");
+    if (!ImGui_ImplVulkan_LoadFunctions(VK_API_VERSION_1_0, imguiVulkanFunction,
+                                        const_cast<DeviceState*>(&device))) {
+        reportRendererStatus("ImGui setup failed: could not load Vulkan functions through the layer dispatch table");
+        return false;
+    }
     if (!init.Queue || !ImGui_ImplVulkan_Init(&init)) {
         reportRendererStatus("ImGui setup failed: Vulkan backend initialization failed");
         return false;
@@ -444,6 +476,11 @@ bool initializeSwapchainRenderer(const DeviceState& device, SwapchainState& chai
 
 bool drawImGui(const DeviceState& device, SwapchainState& chain, VkQueue queue, std::uint32_t imageIndex,
                const VkPresentInfoKHR* presentInfo) {
+    const char* enableDrawing = std::getenv("WHEAT_ENABLE_IMGUI_DRAW");
+    if (!enableDrawing || std::strcmp(enableDrawing, "1") != 0) {
+        reportRendererStatus("ImGui renderer initialized; drawing is paused until WHEAT_ENABLE_IMGUI_DRAW=1");
+        return false;
+    }
     if (imageIndex >= chain.commandBuffers.size() || imageIndex >= chain.renderSemaphores.size()) return false;
     using DrawDataFn = ImDrawData* (*)();
     static auto getDrawData = reinterpret_cast<DrawDataFn>(dlsym(RTLD_DEFAULT, "wheatGetImGuiDrawData"));
@@ -537,18 +574,15 @@ VkResult VKAPI_CALL layerQueuePresent(VkQueue queue, const VkPresentInfoKHR* inf
     const double dt = previous > 0 ? std::min(1.0, static_cast<double>(now - previous) / 1'000'000'000.0) : 0.0;
     const auto frame = frameNumber.fetch_add(1, std::memory_order_relaxed) + 1;
     ProxyGuiLock guiLock(chain && graphicsPresentQueue);
+    if (chain && graphicsPresentQueue)
+        setProxyDisplaySize(static_cast<float>(chain->extent.width), static_cast<float>(chain->extent.height));
     if (!chain) reportRendererStatus("ImGui setup waiting: Vulkan layer did not match the presented swapchain");
     else if (!graphicsPresentQueue) reportRendererStatus("ImGui setup waiting: present queue is not the captured graphics queue");
-    if (chain && graphicsPresentQueue) {
-        using EnsureContextFn = void (*)(float, float);
-        static auto ensureContext = reinterpret_cast<EnsureContextFn>(dlsym(RTLD_DEFAULT, "wheatEnsureImGuiContext"));
-        if (ensureContext) ensureContext(static_cast<float>(chain->extent.width), static_cast<float>(chain->extent.height));
-    }
-    if (chain && graphicsPresentQueue && !imguiBackendReady) initializeSwapchainRenderer(state, *chain);
-    if (graphicsPresentQueue && imguiBackendReady && imguiBackendDevice == state.device) ImGui_ImplVulkan_NewFrame();
     using FrameBridge = void (*)(double, std::uint64_t);
     static auto bridge = reinterpret_cast<FrameBridge>(dlsym(RTLD_DEFAULT, "wheatDispatchVulkanFrame"));
     if (bridge) bridge(dt, frame);
+    if (chain && graphicsPresentQueue && !imguiBackendReady) initializeSwapchainRenderer(state, *chain);
+    if (graphicsPresentQueue && imguiBackendReady && imguiBackendDevice == state.device) ImGui_ImplVulkan_NewFrame();
     if (chain && graphicsPresentQueue && info && info->pImageIndices && imguiBackendReady && imguiBackendDevice == state.device &&
         drawImGui(state, *chain, queue, info->pImageIndices[0], info)) {
         VkPresentInfoKHR modified = *info;

@@ -29,6 +29,8 @@ std::atomic<ModHost*> activeHost{nullptr};
 std::thread worker;
 std::recursive_mutex hostMutex;
 std::mutex loggerMutex;
+std::ofstream* activeLogFile = nullptr;
+std::chrono::steady_clock::time_point logStarted{};
 int proxyModuleAnchor = 0;
 std::atomic<bool> imguiPlatformReady{false};
 std::atomic<bool> imguiRendererReady{false};
@@ -50,6 +52,15 @@ void dispatchFrame(double dt, std::uint64_t frame) {
                                     imguiDisplayHeight.load(std::memory_order_relaxed));
             io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
             io.DeltaTime = static_cast<float>(dt > 0.0 ? dt : 1.0 / 60.0);
+            int mouseX = 0;
+            int mouseY = 0;
+            const Uint32 mouseButtons = SDL_GetMouseState(&mouseX, &mouseY);
+            io.AddMousePosEvent(static_cast<float>(mouseX), static_cast<float>(mouseY));
+            io.AddMouseButtonEvent(0, (mouseButtons & SDL_BUTTON_LMASK) != 0);
+            io.AddMouseButtonEvent(1, (mouseButtons & SDL_BUTTON_RMASK) != 0);
+            io.AddMouseButtonEvent(2, (mouseButtons & SDL_BUTTON_MMASK) != 0);
+            io.AddMouseButtonEvent(3, (mouseButtons & SDL_BUTTON_X1MASK) != 0);
+            io.AddMouseButtonEvent(4, (mouseButtons & SDL_BUTTON_X2MASK) != 0);
         }
         ImGui::NewFrame();
         setImguiFrameActive(true);
@@ -67,6 +78,7 @@ void dispatchFrame(double dt, std::uint64_t frame) {
 
 void initializeImguiPlatform(SDL_Window* window) {
     if (!window || imguiPlatformReady.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::recursive_mutex> lock(hostMutex);
     if (!ImGui::GetCurrentContext()) ImGui::CreateContext();
     if (ImGui_ImplSDL2_InitForVulkan(window)) {
         imguiWindow.store(window, std::memory_order_release);
@@ -102,6 +114,8 @@ void runHost() {
 
         std::ofstream logFile(wheatDir / "loader.log", std::ios::out | std::ios::trunc);
         const auto started = std::chrono::steady_clock::now();
+        activeLogFile = &logFile;
+        logStarted = started;
         LogFn logger = [&logFile, started](std::string_view mod, LogLevel level, std::string_view message) {
             std::lock_guard<std::mutex> lock(loggerMutex);
             if (!logFile) return;
@@ -113,6 +127,12 @@ void runHost() {
         logger("host", LogLevel::Info, "Wheat Linux preload started (cs2, -insecure confirmed)");
         logger("host", LogLevel::Info, "Linux ImGui renderer diagnostics build active");
         logger("host", LogLevel::Info, "Linux frame callbacks use the timer until the opt-in Vulkan layer reports a frame");
+        const char* enableOverlay = std::getenv("WHEAT_ENABLE_IMGUI_OVERLAY");
+        const char* enableRenderer = std::getenv("WHEAT_ENABLE_IMGUI_RENDERER");
+        if (enableOverlay && std::string(enableOverlay) == "1" && enableRenderer && std::string(enableRenderer) == "1") {
+            ImGui::CreateContext();
+            logger("host", LogLevel::Info, "Linux ImGui context created on the Wheat worker thread");
+        }
 
         auto engineConsole = std::make_shared<EngineConsole>();
         ModHostConfig config;
@@ -226,6 +246,7 @@ void runHost() {
         }
         frameHook::stop();
         activeHost.store(nullptr, std::memory_order_release);
+        activeLogFile = nullptr;
         logger("host", LogLevel::Info, "Wheat Linux preload stopping");
     } catch (...) {
     }
@@ -273,9 +294,17 @@ wheatSetImGuiRendererStatus(const char* status) {
 }
 
 extern "C" __attribute__((visibility("default"))) void
-wheatEnsureImGuiContext(float width, float height) {
-    std::lock_guard<std::recursive_mutex> lock(hostMutex);
-    if (!ImGui::GetCurrentContext()) ImGui::CreateContext();
+wheatLogImGuiDiagnostic(const char* message) {
+    if (!message) return;
+    std::lock_guard<std::mutex> lock(loggerMutex);
+    if (!activeLogFile || !*activeLogFile) return;
+    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - logStarted).count();
+    *activeLogFile << '[' << elapsed << "] [host] WARN " << message << '\n';
+    activeLogFile->flush();
+}
+
+extern "C" __attribute__((visibility("default"))) void
+wheatSetImGuiDisplaySize(float width, float height) {
     imguiDisplayWidth.store(width, std::memory_order_relaxed);
     imguiDisplayHeight.store(height, std::memory_order_relaxed);
 }
@@ -306,9 +335,34 @@ SDL_PollEvent(SDL_Event* event) {
     if (!event) return real(nullptr);
     int result = 0;
     while ((result = real(event)) != 0) {
-        if (!imguiPlatformReady.load(std::memory_order_acquire) || !imguiRendererReady.load(std::memory_order_acquire)) return result;
+        if (!imguiRendererReady.load(std::memory_order_acquire)) return result;
         std::lock_guard<std::recursive_mutex> lock(hostMutex);
-        ImGui_ImplSDL2_ProcessEvent(event);
+        if (imguiPlatformReady.load(std::memory_order_acquire)) {
+            ImGui_ImplSDL2_ProcessEvent(event);
+        } else if (ImGui::GetCurrentContext()) {
+            ImGuiIO& io = ImGui::GetIO();
+            switch (event->type) {
+                case SDL_MOUSEMOTION:
+                    io.AddMousePosEvent(static_cast<float>(event->motion.x), static_cast<float>(event->motion.y));
+                    break;
+                case SDL_MOUSEBUTTONDOWN:
+                case SDL_MOUSEBUTTONUP: {
+                    int button = -1;
+                    if (event->button.button == SDL_BUTTON_LEFT) button = 0;
+                    else if (event->button.button == SDL_BUTTON_RIGHT) button = 1;
+                    else if (event->button.button == SDL_BUTTON_MIDDLE) button = 2;
+                    else if (event->button.button == SDL_BUTTON_X1) button = 3;
+                    else if (event->button.button == SDL_BUTTON_X2) button = 4;
+                    if (button >= 0) io.AddMouseButtonEvent(button, event->type == SDL_MOUSEBUTTONDOWN);
+                    break;
+                }
+                case SDL_MOUSEWHEEL:
+                    io.AddMouseWheelEvent(static_cast<float>(event->wheel.x), static_cast<float>(event->wheel.y));
+                    break;
+                default:
+                    break;
+            }
+        }
         const ImGuiIO& io = ImGui::GetIO();
         const bool mouseEvent = event->type == SDL_MOUSEMOTION || event->type == SDL_MOUSEBUTTONDOWN ||
                                 event->type == SDL_MOUSEBUTTONUP || event->type == SDL_MOUSEWHEEL;

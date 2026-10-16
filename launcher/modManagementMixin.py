@@ -377,7 +377,7 @@ class ModManagementMixin:
 
         def configureApiAllowList(self, installation: dict):
             consoleApis = ["console.get", "console.default", "console.allowed", "console.available"]
-            imguiApis = ["imgui.begin", "imgui.text", "imgui.button", "imgui.finish", "imgui.separator", "imgui.same_line"]
+            imguiApis = ["imgui.begin", "imgui.text", "imgui.button", "imgui.finish", "imgui.separator", "imgui.same_line", "imgui.image"]
             choices = consoleApis + ["data"] + imguiApis
             wheat = gameBinFor(Path(installation["path"]), installation.get("cs2_platform", "windows")) / "wheat"
             path = wheat / "apiAllowList.txt"

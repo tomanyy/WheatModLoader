@@ -646,9 +646,9 @@ class InstallationMixin:
                 installation["profile_api_allow_list"] = [
                     name for name in profile.get("api_allow_list", [])
                     if name in {"console.get", "console.default", "console.allowed", "console.available", "data",
-                                "imgui.begin", "imgui.text", "imgui.button", "imgui.finish", "imgui.separator", "imgui.same_line"}
+                                "imgui.begin", "imgui.text", "imgui.button", "imgui.finish", "imgui.separator", "imgui.same_line", "imgui.image"}
                 ] if isinstance(profile.get("api_allow_list", []), list) else ["console.get", "console.default", "console.allowed", "console.available", "data",
-                                                                                 "imgui.begin", "imgui.text", "imgui.button", "imgui.finish", "imgui.separator", "imgui.same_line"]
+                                                                                 "imgui.begin", "imgui.text", "imgui.button", "imgui.finish", "imgui.separator", "imgui.same_line", "imgui.image"]
                 rawMods = profile.get("mods", {}) if isinstance(profile.get("mods", {}), dict) else {}
                 safeModName = lambda name: isinstance(name, str) and bool(name) and name not in (".", "..") and "/" not in name and "\\" not in name
                 installation["profile_mods"] = {
@@ -814,12 +814,12 @@ class InstallationMixin:
             wheat = gameBinFor(Path(installation["path"]), platform) / "wheat"
             wheat.mkdir(parents=True, exist_ok=True)
             allowed = {"console.get", "console.default", "console.allowed", "console.available", "data",
-                       "imgui.begin", "imgui.text", "imgui.button", "imgui.finish", "imgui.separator", "imgui.same_line"}
+                       "imgui.begin", "imgui.text", "imgui.button", "imgui.finish", "imgui.separator", "imgui.same_line", "imgui.image"}
             if "profile_api_allow_list" in installation:
                 api = [item for item in installation.get("profile_api_allow_list", []) if item in allowed]
             else:
                 api = ["console.get", "console.default", "console.allowed", "console.available", "data",
-                       "imgui.begin", "imgui.text", "imgui.button", "imgui.finish", "imgui.separator", "imgui.same_line"]
+                       "imgui.begin", "imgui.text", "imgui.button", "imgui.finish", "imgui.separator", "imgui.same_line", "imgui.image"]
             (wheat / "apiAllowList.txt").write_text("".join(item + "\n" for item in api), encoding="utf-8")
             if "profile_api_allow_list" not in installation:
                 return
