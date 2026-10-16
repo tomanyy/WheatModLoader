@@ -48,6 +48,9 @@ struct SandboxImpl {
     std::vector<std::string> events;
 
     lua_State* L = nullptr;
+    lua_State* mainThread = nullptr;
+    int mainThreadRef = LUA_NOREF;
+    double mainThreadDue = 0.0;
     std::size_t mem_used = 0;
 
     // instruction budget for the call currently in progress
@@ -75,6 +78,8 @@ struct SandboxImpl {
         return false;
     }
     int guarded_pcall(int nargs, int nres, std::uint64_t instruction_budget, int wall_ms);
+    int guarded_resume(lua_State* thread, int nargs, int& nresults,
+                       std::uint64_t instruction_budget, int wall_ms);
     void strike(int rc);
     void build_env();
 };
@@ -173,6 +178,21 @@ int SandboxImpl::guarded_pcall(int nargs, int nres, std::uint64_t instruction_bu
     inCall = false;
     lua_sethook(L, nullptr, 0, 0);
     lua_remove(L, base);
+    return rc;
+}
+
+int SandboxImpl::guarded_resume(lua_State* thread, int nargs, int& nresults,
+                                std::uint64_t instruction_budget, int wall_ms) {
+    used = 0;
+    pattern_used = 0;
+    budget = instruction_budget;
+    tripped = false;
+    deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wall_ms);
+    lua_sethook(thread, budget_hook, LUA_MASKCOUNT, kHookStride);
+    inCall = true;
+    const int rc = lua_resume(thread, L, nargs, &nresults);
+    inCall = false;
+    lua_sethook(thread, nullptr, 0, 0);
     return rc;
 }
 
@@ -375,6 +395,16 @@ static int timerCreate(lua_State* L, bool repeating) {
 static int sb_timers_after(lua_State* L) { return timerCreate(L, false); }
 static int sb_timers_every(lua_State* L) { return timerCreate(L, true); }
 
+static int sb_wait(lua_State* L) {
+    const lua_Number delay = luaL_checknumber(L, 1);
+    if (!(delay >= 0.0) || delay > kMaxTimerSeconds)
+        return luaL_error(L, "wait delay must be between 0 and 86400 seconds");
+    if (!lua_isyieldable(L))
+        return luaL_error(L, "wait() can only be used in the top-level main.lua coroutine");
+    lua_pushnumber(L, delay);
+    return lua_yield(L, 1);
+}
+
 static int sb_timers_cancel(lua_State* L) {
     const lua_Integer id = luaL_checkinteger(L, 1);
     lua_getfield(L, LUA_REGISTRYINDEX, kTimersKey);
@@ -481,6 +511,8 @@ void SandboxImpl::build_env() {
     lua_setfield(L, env, "print");
     lua_pushcfunction(L, sb_collectgarbage);
     lua_setfield(L, env, "collectgarbage");
+    lua_pushcfunction(L, sb_wait);
+    lua_setfield(L, env, "wait");
 
     lua_newtable(L);
     lua_pushcfunction(L, sb_events_on);
@@ -606,9 +638,32 @@ bool ModSandbox::load_main() {
 
     bool ok = push_chunk(L, &im, "main.lua", "@main.lua", env_idx);
     if (ok) {
-        const int rc = im.guarded_pcall(0, 0, im.limits.load_instructions, im.limits.load_wall_ms);
-        ok = (rc == LUA_OK);
-        if (!ok) im.emit(LogLevel::Error, lua_tostring(L, -1) ? lua_tostring(L, -1) : "unknown error");
+        im.mainThread = lua_newthread(L);
+        im.mainThreadRef = luaL_ref(L, LUA_REGISTRYINDEX);
+        lua_pushvalue(L, top + 2);
+        lua_xmove(L, im.mainThread, 1);
+        int nresults = 0;
+        const int rc = im.guarded_resume(im.mainThread, 0, nresults,
+                                         im.limits.load_instructions, im.limits.load_wall_ms);
+        if (rc == LUA_YIELD) {
+            double delay = 0.05;
+            if (nresults > 0 && lua_isnumber(im.mainThread, -nresults))
+                delay = std::clamp(lua_tonumber(im.mainThread, -nresults), 0.0, kMaxTimerSeconds);
+            lua_pop(im.mainThread, nresults);
+            im.mainThreadDue = nowSeconds() + delay;
+        } else if (rc == LUA_OK) {
+            lua_settop(im.mainThread, 0);
+            luaL_unref(L, LUA_REGISTRYINDEX, im.mainThreadRef);
+            im.mainThreadRef = LUA_NOREF;
+            im.mainThread = nullptr;
+        } else {
+            const char* message = lua_tostring(im.mainThread, -1);
+            im.emit(LogLevel::Error, message ? message : "unknown error in main.lua");
+            luaL_unref(L, LUA_REGISTRYINDEX, im.mainThreadRef);
+            im.mainThreadRef = LUA_NOREF;
+            im.mainThread = nullptr;
+            ok = false;
+        }
     } else {
         im.emit(LogLevel::Error, std::string("cannot load main.lua: ") + lua_tostring(L, -1));
     }
@@ -660,9 +715,10 @@ bool ModSandbox::dispatch(const std::string& event, const std::vector<EventArg>&
 std::size_t ModSandbox::runTimers() {
     auto& im = *impl_;
     lua_State* L = im.L;
-    if (im.dead || !im.env_built || im.timerCount == 0 || !lua_checkstack(L, 8)) return 0;
+    if (im.dead || !im.env_built || !lua_checkstack(L, 8)) return 0;
 
     const double now = nowSeconds();
+    if (im.timerCount == 0 && (!im.mainThread || im.mainThreadDue > now)) return 0;
     const int top = lua_gettop(L);
     lua_getfield(L, LUA_REGISTRYINDEX, kTimersKey);
     const int timers = lua_gettop(L);
@@ -708,6 +764,33 @@ std::size_t ModSandbox::runTimers() {
         }
     }
     lua_settop(L, top);
+
+    if (im.mainThread && im.mainThreadDue <= nowSeconds() && !im.dead) {
+        int nresults = 0;
+        const int rc = im.guarded_resume(im.mainThread, 0, nresults,
+                                         im.limits.event_instructions, im.limits.event_wall_ms);
+        if (rc == LUA_YIELD) {
+            double delay = 0.05;
+            if (nresults > 0 && lua_isnumber(im.mainThread, -nresults))
+                delay = std::clamp(lua_tonumber(im.mainThread, -nresults), 0.0, kMaxTimerSeconds);
+            lua_pop(im.mainThread, nresults);
+            im.mainThreadDue = nowSeconds() + delay;
+        } else if (rc == LUA_OK) {
+            lua_settop(im.mainThread, 0);
+            luaL_unref(L, LUA_REGISTRYINDEX, im.mainThreadRef);
+            im.mainThreadRef = LUA_NOREF;
+            im.mainThread = nullptr;
+        } else {
+            ++failed;
+            const char* message = lua_tostring(im.mainThread, -1);
+            im.emit(LogLevel::Error, message ? message : "unknown error in main.lua coroutine");
+            im.strike(rc);
+            luaL_unref(L, LUA_REGISTRYINDEX, im.mainThreadRef);
+            im.mainThreadRef = LUA_NOREF;
+            im.mainThread = nullptr;
+            im.dead = true;
+        }
+    }
     return failed;
 }
 

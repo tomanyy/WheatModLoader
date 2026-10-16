@@ -66,14 +66,15 @@ public:
     void add_api(std::string name, ApiBuilder build);  // exposed to the mod as a read-only global table
     void declare_event(std::string name);              // only declared events can be subscribed to
 
-    // Runs <root>/main.lua under the load budget. Returns false (and disables the mod) on failure.
+    // Runs <root>/main.lua under the load budget until it completes or yields with wait().
+    // Returns false (and disables the mod) on failure.
     bool load_main();
 
     // Calls every handler the mod registered for `event`, each under its own budget.
     // Returns true only if all handlers completed without error.
     bool dispatch(const std::string& event, const std::vector<EventArg>& args = {});
 
-    // Runs every timer that has come due (timers.after / timers.every). Returns how many callbacks failed.
+    // Resumes a yielded main.lua coroutine and runs due timers. Returns how many callbacks failed.
     std::size_t runTimers();
 
     std::size_t memory_used() const;

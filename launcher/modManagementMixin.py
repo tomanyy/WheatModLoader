@@ -1,4 +1,5 @@
 from .common import *
+from PyQt6.QtWidgets import QListWidgetItem
 
 
 class ModManagementMixin:
@@ -44,7 +45,11 @@ class ModManagementMixin:
                     except OSError:
                         pass
                 for name, (_, enabled) in sorted(modLocations.items(), key=lambda pair: pair[0].casefold()):
-                    item = QListWidgetItem(("● " if enabled else "○ ") + name)
+                    manifestName = self.modManifestFields(modLocations[name][0])["name"]
+                    label = manifestName if manifestName != name else name
+                    if label != name:
+                        label += f" ({name})"
+                    item = QListWidgetItem(("● " if enabled else "○ ") + label)
                     item.setData(Qt.ItemDataRole.UserRole, name)
                     listing.addItem(item)
                 if not modLocations:
@@ -65,20 +70,14 @@ class ModManagementMixin:
                 stateButton.setEnabled(True)
                 stateButton.setText("Disable" if enabled else "Enable")
                 deleteButton.setEnabled(True)
-                info = {"name": name, "description": "No description provided.", "author": "", "version": ""}
-                try:
-                    manifest = (folder / "manifest.lua").read_text(encoding="utf-8", errors="replace")
-                    for key in info:
-                        match = re.search(rf"{key}\s*=\s*['\"]([^'\"]*)['\"]", manifest)
-                        if match:
-                            info[key] = match.group(1)
-                except OSError:
-                    pass
+                info = self.modManifestFields(folder)
+                if not info["description"]:
+                    info["description"] = "No description provided."
                 icon = next((p for p in folder.iterdir() if p.is_file() and p.name.lower() in ("icon.png", "icon.jpg", "icon.jpeg", "icon.gif")), None)
-                imageHtml = f'<p><img src="{icon.asUri()}" width="96" height="96"></p>' if icon else ""
+                imageHtml = f'<p><img src="{icon.as_uri()}" width="96" height="96"></p>' if icon else ""
                 details.setHtml(f"{imageHtml}<h2>{html.escape(info['name'])}</h2><p>{html.escape(info['description'])}</p>"
                                 f"<p>Version: {html.escape(info['version'] or 'unknown')}<br>Author: {html.escape(info['author'] or 'unknown')}<br>"
-                                f"Status: {'Enabled' if enabled else 'Disabled'}</p><p>{html.escape(str(folder))}</p>")
+                                f"Internal ID: {html.escape(name)}<br>Status: {'Enabled' if enabled else 'Disabled'}</p><p>{html.escape(str(folder))}</p>")
     
             def moveSelected():
                 name, location = selected()
@@ -118,13 +117,17 @@ class ModManagementMixin:
         def modManifestFields(modDir: Path) -> dict[str, str]:
             fields = {"name": modDir.name, "version": "", "description": "", "author": "", "repository": "", "update_url": ""}
             try:
-                manifest = (modDir / "manifest.lua").read_text(encoding="utf-8", errors="replace")
-            except OSError:
+                manifest = json.loads((modDir / "manifest.json").read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                return fields
+            if not isinstance(manifest, dict):
                 return fields
             for key in fields:
-                match = re.search(rf"\b{key}\s*=\s*['\"]([^'\"]*)['\"]", manifest)
-                if match:
-                    fields[key] = match.group(1).strip()
+                value = manifest.get(key)
+                if isinstance(value, str):
+                    normalized = value.strip()
+                    if normalized or key != "name":
+                        fields[key] = normalized
             return fields
 
         @staticmethod
@@ -249,10 +252,20 @@ class ModManagementMixin:
                             brokenLinks += 1
                     dirs[:] = [name for name in dirs if not (currentPath / name).is_symlink()]
             checks.append((brokenLinks == 0, f"Broken symlinks: {brokenLinks}"))
-            text = "\n".join(("PASS" if okay else "ISSUE") + "  " + description for okay, description in checks)
-            QMessageBox.information(self, "Installation Health Check", text)
+            installationReport = ["Installation"] + [
+                ("PASS" if okay else "ISSUE") + "  " + description for okay, description in checks
+            ]
+            steamChecks = self.steamIntegrationChecks(installation)
+            steamReport = [
+                ("PASS" if okay else "ISSUE") + "  " + description for okay, description in steamChecks
+            ]
+            QMessageBox.information(
+                self,
+                "Installation & Steam Health",
+                "\n".join(installationReport + ["", "Steam Integration"] + steamReport),
+            )
 
-        def checkSteamIntegration(self, installation: dict):
+        def steamIntegrationChecks(self, installation: dict) -> list[tuple[bool, str]]:
             root = Path(installation["path"]).expanduser()
             platform = installation.get("cs2_platform", "windows")
             exe = gameExecutable(root, platform)
@@ -264,9 +277,10 @@ class ModManagementMixin:
                 (proxy.is_file(), "Wheat loader exists in the game directory"),
             ]
             shortcutId = installation.get("steam_shortcut_appid")
+            launchExe = gameLaunchExecutable(root, platform)
             shortcutExe = installation.get("steam_shortcut_exe")
             checks.append((bool(shortcutId), "Steam shortcut is registered in launcher settings"))
-            checks.append((shortcutExe == os.path.abspath(os.fspath(exe)), "Shortcut points to this installation"))
+            checks.append((shortcutExe == os.path.abspath(os.fspath(launchExe)), "Shortcut points to this installation"))
             matchingShortcut = False
             shortcutOptions = ""
             shortcutExecutable = ""
@@ -295,14 +309,15 @@ class ModManagementMixin:
             checks.append((matchingShortcut, "Steam shortcuts.vdf contains the Wheat entry"))
             actualShortcutExe = shortcutExecutable.strip('"')
             checks.append((bool(actualShortcutExe) and os.path.normcase(os.path.abspath(actualShortcutExe))
-                           == os.path.normcase(os.path.abspath(os.fspath(exe))), "Steam shortcut executable points to this CS2 installation"))
-            requiredOption = "LD_PRELOAD=" if platform == "linux" else "WINEDLLOVERRIDES=winmm=n,b"
-            launchTargetOk = (requiredOption in shortcutOptions and "-insecure" in shortcutOptions
-                                and (platform != "linux" or str(proxy) in shortcutOptions))
-            checks.append((launchTargetOk,
-                           f"Steam launch options include {requiredOption.rstrip('=')} and -insecure"))
-            report = "\n".join(("PASS" if okay else "ISSUE") + "  " + text for okay, text in checks)
-            QMessageBox.information(self, "Steam Integration Check", report)
+                           == os.path.normcase(os.path.abspath(os.fspath(launchExe))), "Steam shortcut executable points to this CS2 installation"))
+            requiredOption = ("LD_PRELOAD=" if platform == "linux" else
+                              "WINEDLLOVERRIDES=winmm=n,b" if sys.platform.startswith("linux") else "")
+            launchTargetOk = ((not requiredOption or requiredOption in shortcutOptions)
+                                and "-steam" in shortcutOptions and "-insecure" in shortcutOptions
+                                and (platform != "linux" or "bin/linuxsteamrt64/winmm.dll" in shortcutOptions))
+            launchRequirements = ([requiredOption.rstrip("=")] if requiredOption else []) + ["-steam", "-insecure"]
+            checks.append((launchTargetOk, "Steam launch options include " + ", ".join(launchRequirements)))
+            return checks
 
         def exportInstallProfile(self, installation: dict):
             root = Path(installation["path"]).expanduser()
@@ -330,6 +345,7 @@ class ModManagementMixin:
                 "separate": bool(installation.get("separate", True)),
                 "wheat_version": installation.get("wheat_version", ""),
                 "wheat_dll": installation.get("wheat_dll", ""),
+                "vulkan_layer_enabled": bool(installation.get("vulkan_layer_enabled", False)),
                 "api_allow_list": api,
                 "mods": mods,
                 "mods_source_installation": str(root),
@@ -360,34 +376,51 @@ class ModManagementMixin:
             self.newInstallation(profile)
 
         def configureApiAllowList(self, installation: dict):
-            choices = ["console.get", "console.default", "console.allowed", "console.available", "data"]
-            path = gameBinFor(Path(installation["path"]), installation.get("cs2_platform", "windows")) / "wheat/apiAllowList.txt"
+            consoleApis = ["console.get", "console.default", "console.allowed", "console.available"]
+            imguiApis = ["imgui.begin", "imgui.text", "imgui.button", "imgui.finish", "imgui.separator", "imgui.same_line"]
+            choices = consoleApis + ["data"] + imguiApis
+            wheat = gameBinFor(Path(installation["path"]), installation.get("cs2_platform", "windows")) / "wheat"
+            path = wheat / "apiAllowList.txt"
             try:
                 current = set(path.read_text(encoding="utf-8").splitlines()) if path.exists() else set(choices)
             except OSError as exc:
                 QMessageBox.warning(self, "Could not read API permissions", str(exc))
                 return
+            access = {api: api in current for api in choices}
+            originalAccess = access.copy()
             dialog = QDialog(self)
             dialog.setWindowTitle(f"API Allow List · {installation.get('name', 'Wheat')}")
             dialog.resize(520, 380)
             layout = QVBoxLayout(dialog)
-            layout.addWidget(QLabel("Choose which APIs mods can access. Changes apply when CS2 next starts."))
+            layout.addWidget(QLabel("Expand a category to manage access. Engine status reflects the last CS2 startup; permission changes apply after restart."))
             search = QLineEdit()
             search.setPlaceholderText("Search APIs…")
             layout.addWidget(search)
-            table = QTableWidget(len(choices), 2)
-            table.setHorizontalHeaderLabels(["API", "Access"])
-            table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-            table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-            table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-            table.verticalHeader().setVisible(False)
-            table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-            table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-            originalAccess = {api: "Allowed" if api in current else "Blocked" for api in choices}
-            for row, api in enumerate(choices):
-                table.setItem(row, 0, QTableWidgetItem(api))
-                table.setItem(row, 1, QTableWidgetItem(originalAccess[api]))
-            layout.addWidget(table, 1)
+            tree = QTreeWidget()
+            tree.setColumnCount(3)
+            tree.setHeaderLabels(["API", "Access", "Engine status"])
+            tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+            tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+            tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+            layout.addWidget(tree, 1)
+
+            categories = {}
+            apiItems = {}
+            categoryApis = {"console": consoleApis, "data": ["data"], "imgui": imguiApis}
+            for category, apis in categoryApis.items():
+                parent = QTreeWidgetItem([category, "", ""])
+                parent.setData(0, Qt.ItemDataRole.UserRole, "category:" + category)
+                tree.addTopLevelItem(parent)
+                categories[category] = parent
+                for api in apis:
+                    label = "table" if api == "data" else api + "()"
+                    child = QTreeWidgetItem([label, "", ""])
+                    child.setData(0, Qt.ItemDataRole.UserRole, "api:" + api)
+                    parent.addChild(child)
+                    apiItems[api] = child
+                parent.setExpanded(False)
+
             permissionActions = QHBoxLayout()
             allowButton = QPushButton("Allow")
             blockButton = QPushButton("Block")
@@ -395,48 +428,134 @@ class ModManagementMixin:
             permissionActions.addWidget(blockButton)
             permissionActions.addStretch(1)
             layout.addLayout(permissionActions)
-    
-            def selectedApiRow() -> int:
-                return table.currentRow()
-    
-            def setSelectedAccess(access: str):
-                row = selectedApiRow()
-                if row >= 0:
-                    table.item(row, 1).setText(access)
-                    updateChangedRow(row)
-                    filterApiRows(search.text())
-    
-            def updateChangedRow(row: int):
-                api = table.item(row, 0).text()
-                changed = table.item(row, 1).text() != originalAccess[api]
-                for column in range(2):
-                    font = table.item(row, column).font()
-                    font.setBold(changed)
-                    table.item(row, column).setFont(font)
-    
-            def toggleSelectedAccess(row: int, Column: int):
-                status = table.item(row, 1).text()
+
+            originalCategoryStatus = {
+                category: "Allowed" if all(originalAccess[api] for api in apis)
+                else "Blocked" if not any(originalAccess[api] for api in apis)
+                else "Partial"
+                for category, apis in categoryApis.items()
+            }
+
+            def consoleRuntimeStatus() -> str:
+                if any(access[api] != originalAccess[api] for api in consoleApis):
+                    return "Pending save and restart"
+                if not path.is_file():
+                    return "Inactive — save an allow list"
+                try:
+                    savedApis = set(path.read_text(encoding="utf-8").splitlines())
+                    if not any(api in savedApis for api in consoleApis):
+                        return "Blocked by allow list"
+                    reportPath = wheat / "consoleReport.txt"
+                    if not reportPath.is_file():
+                        return "Inactive — start CS2"
+                    report = reportPath.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    return "Status unavailable"
+                try:
+                    if path.stat().st_mtime_ns > reportPath.stat().st_mtime_ns:
+                        return "Restart required"
+                except OSError:
+                    return "Status unavailable"
+                if "RESULT: console API enabled (read-only)" in report or "RESULT: Linux engine interface and convar records calibrated" in report:
+                    return "Ready (last startup)"
+                if "FAILED:" in report or "RESULT: console API stays off" in report:
+                    return "Unavailable — see consoleReport.txt"
+                return "Not initialized — see consoleReport.txt"
+
+            def refreshTree():
+                for category, apis in categoryApis.items():
+                    parent = categories[category]
+                    count = sum(access[api] for api in apis)
+                    status = "Blocked" if count == 0 else "Allowed" if count == len(apis) else "Partial"
+                    parent.setText(1, status)
+                    parent.setText(2, consoleRuntimeStatus() if category == "console" else "—")
+                    for column in range(2):
+                        font = parent.font(column)
+                        font.setBold(column == 0 or status != originalCategoryStatus[category])
+                        parent.setFont(column, font)
+                    for api in apis:
+                        item = apiItems[api]
+                        item.setText(1, "Allowed" if access[api] else "Blocked")
+                        item.setText(2, "—")
+                        for column in range(2):
+                            font = item.font(column)
+                            font.setBold(access[api] != originalAccess[api])
+                            item.setFont(column, font)
+                updatePermissionActions()
+                filterApiRows(search.text())
+
+            def selectedItemApi(item):
+                if item is None:
+                    return ""
+                return str(item.data(0, Qt.ItemDataRole.UserRole) or "")
+
+            def setSelectedAccess(permission: str):
+                item = tree.currentItem()
+                selected = selectedItemApi(item)
+                if selected.startswith("category:"):
+                    category = selected.split(":", 1)[1]
+                    for api in categoryApis[category]:
+                        access[api] = permission == "Allowed"
+                elif selected.startswith("api:"):
+                    api = selected.split(":", 1)[1]
+                    access[api] = permission == "Allowed"
+                refreshTree()
+
+            def toggleSelectedAccess(item, column: int):
+                selected = selectedItemApi(item)
+                if selected.startswith("category:"):
+                    category = selected.split(":", 1)[1]
+                    apis = categoryApis[category]
+                    status = "Allowed" if all(access[api] for api in apis) else "Blocked"
+                else:
+                    api = selected.split(":", 1)[1]
+                    status = "Allowed" if access[api] else "Blocked"
                 setSelectedAccess("Blocked" if status == "Allowed" else "Allowed")
-    
+
             def filterApiRows(text: str):
                 query = text.strip().casefold()
-                for row in range(table.rowCount()):
-                    api = table.item(row, 0).text().casefold()
-                    status = table.item(row, 1).text().casefold()
-                    table.setRowHidden(row, query not in api and query not in status)
-    
+                for category, apis in categoryApis.items():
+                    parent = categories[category]
+                    categoryStatus = parent.text(1).casefold()
+                    parentMatch = not query or query in category.casefold() or query in categoryStatus
+                    matchingChildren = []
+                    for api in apis:
+                        item = apiItems[api]
+                        status = "allowed" if access[api] else "blocked"
+                        label = item.text(0).casefold()
+                        visible = not query or parentMatch or query in api.casefold() or query in label or query in status
+                        item.setHidden(not visible)
+                        if visible:
+                            matchingChildren.append(item)
+                    parent.setHidden(bool(query) and not parentMatch and not matchingChildren)
+                    if query and not parent.isHidden():
+                        parent.setExpanded(True)
+                    elif not query:
+                        parent.setExpanded(False)
+
             allowButton.clicked.connect(lambda: setSelectedAccess("Allowed"))
             blockButton.clicked.connect(lambda: setSelectedAccess("Blocked"))
-            table.cellDoubleClicked.connect(toggleSelectedAccess)
+            tree.itemDoubleClicked.connect(toggleSelectedAccess)
             search.textChanged.connect(filterApiRows)
-    
+
             def updatePermissionActions():
-                row = selectedApiRow()
-                allowButton.setEnabled(row >= 0 and table.item(row, 1).text() != "Allowed")
-                blockButton.setEnabled(row >= 0 and table.item(row, 1).text() != "Blocked")
-    
-            table.itemSelectionChanged.connect(updatePermissionActions)
-            table.itemChanged.connect(updatePermissionActions)
+                item = tree.currentItem()
+                selected = selectedItemApi(item)
+                if selected.startswith("category:"):
+                    category = selected.split(":", 1)[1]
+                    apis = categoryApis[category]
+                    allowButton.setEnabled(not all(access[api] for api in apis))
+                    blockButton.setEnabled(any(access[api] for api in apis))
+                elif selected.startswith("api:"):
+                    enabled = access[selected.split(":", 1)[1]]
+                    allowButton.setEnabled(not enabled)
+                    blockButton.setEnabled(enabled)
+                else:
+                    allowButton.setEnabled(False)
+                    blockButton.setEnabled(False)
+
+            tree.itemSelectionChanged.connect(updatePermissionActions)
+            refreshTree()
             updatePermissionActions()
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
             buttons.accepted.connect(dialog.accept)
@@ -446,8 +565,7 @@ class ModManagementMixin:
                 return
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("".join(table.item(row, 0).text() + "\n" for row in range(table.rowCount())
-                                        if table.item(row, 1).text() == "Allowed"), encoding="utf-8")
+                path.write_text("".join(api + "\n" for api in choices if access[api]), encoding="utf-8")
             except OSError as exc:
                 QMessageBox.warning(self, "Could not save API permissions", str(exc))
 

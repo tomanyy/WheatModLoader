@@ -83,7 +83,7 @@ class LogNewsMixin:
             dialog = QDialog(self)
             dialog.setWindowTitle(f"Logs · {installation.get('name', 'Wheat')}")
             dialog.resize(900, 600)
-            dialog.setAttribute(Qt.WidgetAttribute.WADeleteOnClose, True)
+            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
             layout = QVBoxLayout(dialog)
             toolbar = QHBoxLayout()
             toolbar.addWidget(QLabel("Log file:"))

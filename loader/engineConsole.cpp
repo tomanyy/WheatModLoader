@@ -434,9 +434,7 @@ bool EngineConsole::initialize(const fs::path& wheatDir) {
     im.reportFile.open(wheatDir / "consoleReport.txt", std::ios::trunc);
     bool ok = false;
     try {
-        if (!fs::exists(wheatDir / "consoleApi.on")) {
-            im.say("disabled: create the file wheat/consoleApi.on to enable engine access");
-        } else if (im.discover() && im.calibrate(wheatDir)) {
+        if (im.discover() && im.calibrate(wheatDir)) {
             ok = true;
             im.say("RESULT: console API enabled (read-only)");
         } else {

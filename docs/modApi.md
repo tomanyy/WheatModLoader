@@ -4,20 +4,28 @@ A mod is a folder in `wheat/mods/`:
 
 ```
 wheat/mods/myMod/
-  manifest.lua   -- recommended
+  manifest.json  -- recommended
   main.lua       -- required, runs once when the mod loads
   *.lua          -- anything main.lua loads with require("name")
   data/          -- created on demand, see `data`
 ```
 
-## manifest.lua
+## manifest.json
 
-```lua
-return { name = "myMod", version = "1.0.0", apiVersion = 1, author = "you", description = "optional", repository = "https://github.com/you/myMod" }
+```json
+{
+  "name": "myMod",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "author": "you",
+  "description": "A short description of the mod",
+  "repository": "https://github.com/you/myMod"
+}
 ```
 
-`name` must equal the folder name. `apiVersion` must not be newer than the loader's. The file is evaluated with
-an empty environment, so it can only return a table. A mod without a manifest loads with a warning.
+`name` is the display name and does not need to match the folder. The folder name is the internal mod ID and must use only letters, digits, `_`, or `-` (up to 64 characters). `version` must be a string and `apiVersion` must be an integer no newer than the loader's. Optional fields include `author`, `description`, `repository`, and `update_url`. A mod without a manifest loads with a warning and uses its folder name as the display name.
+
+The launcher displays `name`, `version`, `author`, and `description` from this table. To show an icon in **Manage Mods**, place `icon.png`, `icon.jpg`, `icon.jpeg`, or `icon.gif` directly inside the mod folder.
 
 For launcher update checks, optionally set `repository` to a GitHub repository URL. The launcher compares the manifest
 version with the latest GitHub release tag. Mods hosted elsewhere can instead set `update_url` to an HTTPS JSON endpoint
@@ -27,7 +35,7 @@ and link; the launcher does not download or replace mod files.
 ## Events
 
 ```lua
-events.on("frame", function(dt, frameNumber) end)   -- Windows: render frames; Linux: 10 Hz timer
+events.on("frame", function(dt, frameNumber) end)   -- Windows: render frames; Linux: Vulkan present frames with a 10 Hz fallback
 events.on("mods_loaded", function() end)            -- once, after every mod has loaded
 ```
 
@@ -41,7 +49,15 @@ local id = timers.every(1, fn)     -- repeating, minimum interval 0.05 s
 timers.cancel(id)                  -- true if it existed
 ```
 
-Timers run on frame boundaries. At most 64 per mod.
+Timers run on frame boundaries. At most 64 per mod. `wait(seconds)` can suspend the top-level `main.lua` coroutine;
+it resumes on a later frame. It is not available inside event handlers or timer callbacks.
+
+```lua
+while true do
+    print("fps_max:", console.get("fps_max"))
+    wait(1)
+end
+```
 
 ## data
 
@@ -73,21 +89,42 @@ crosshair, HUD, radar and viewmodel settings, plus selected audio and music sett
 game dump. There are no prefix rules; debug, diagnostic and internal convars remain blocked even when their
 names share a prefix with an allowed setting. Names must be lowercase letters, digits and `_`.
 
-Engine access is off until you create `wheat/consoleApi.on` next to `winmm.dll`. At startup the loader checks
+When `wheat/apiAllowList.txt` explicitly allows at least one `console.*` method, the loader initializes engine access; no separate `consoleApi.on` file is needed. At startup the loader checks
 the engine's data layout against several known convars and switches the API off if anything does not match.
 For the currently inspected game build, current numeric values are read at offset 88. Offset 96 can contain
-default or cached values and must not be selected by comparing values against defaults.
+default or cached values and should not be used as the current value slot.
 It writes what it found to `wheat/consoleReport.txt`, line by line, before each engine call. Create
 `wheat/dumpConvars` as well to get `wheat/convars.txt`, a list of every convar with its type and flags.
-The native Linux preload runtime currently has no CS2 engine-console backend, so console functions report `console unavailable` there.
+On native Linux, the loader looks for `VEngineCvar007` in the loaded `libengine2.so`, checks that the expected virtual methods live in CS2 engine modules, and calibrates the convar record layout against known names before enabling reads. Any failed check leaves the API unavailable. The Linux result is written to `wheat/consoleReport.txt`.
 
-Installations can restrict the exposed functions with `wheat/apiAllowList.txt`, one entry per line. The launcher edits this list from an installation's **API Allow List** menu. Supported entries are `console.get`, `console.default`, `console.allowed`, `console.available`, and `data`. A listed console function is omitted from the Lua API when not allowed; omitting `data` removes the complete `data` table. If the file is absent, all currently implemented APIs retain their default behavior.
+## imgui (Linux, experimental)
+
+With the installation's experimental Linux Vulkan layer enabled, a mod can draw an overlay from its `frame` event:
+
+```lua
+events.on("frame", function()
+    imgui.begin("My mod")
+    imgui.text("Hello from Wheat")
+    if imgui.button("Click me") then
+        print("button clicked")
+    end
+    imgui.finish()
+end)
+```
+
+`imgui.begin(title)` defaults to the mod's display name. The API also provides `imgui.separator()` and
+`imgui.same_line()`. SDL2 events feed ImGui input, and mouse or keyboard events are withheld from CS2 while ImGui
+requests capture. The Vulkan layer draws only when the present queue supports graphics and a compatible swapchain is
+available. Without the layer or an available rendering context, drawing calls have no visible effect. Each function
+has its own API Allow List entry under the `imgui` category.
+
+Installations can restrict the exposed functions with `wheat/apiAllowList.txt`, one entry per line. The launcher edits this list from an installation's **API Allow List** menu. Supported entries are the four `console.*` functions, `data`, and the six `imgui.*` functions above. A listed console function is omitted from the Lua API when not allowed; omitting `data` removes the complete `data` table. If the file is absent, API functions retain their default exposure, but the engine console backend stays off until the launcher saves an allow list containing at least one `console.*` entry.
 
 ## wheat
 
 ```lua
 wheat.api_version   -- 1
-wheat.mod_name      -- the folder name
+wheat.mod_name      -- the internal folder ID
 wheat.now()         -- monotonic seconds
 ```
 

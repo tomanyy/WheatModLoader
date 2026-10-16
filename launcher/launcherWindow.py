@@ -447,7 +447,7 @@ class Launcher(InstallationMixin, ModManagementMixin, LogNewsMixin, SteamCmdMixi
                     "Right-click this installation and choose Add / Update Steam Entry. Fully exit Steam first, then restart it to load the new entry.",
                 )
                 return
-            expectedExe = os.path.abspath(os.fspath(executable))
+            expectedExe = os.path.abspath(os.fspath(gameLaunchExecutable(target, platform)))
             if installation.get("steam_shortcut_exe") != expectedExe:
                 QMessageBox.information(
                     self, "Update Steam entry",

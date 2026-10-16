@@ -134,10 +134,11 @@ struct HostPublisher {
     }
 };
 
-static void initializeConsole(EngineConsole& console, const fs::path& base, FileLog& log) {
+static bool initializeConsole(EngineConsole& console, const fs::path& base, FileLog& log) {
     const bool enabled = console.initialize(base);
     log.write("host", enabled ? LogLevel::Info : LogLevel::Warn,
               enabled ? "console API enabled (read-only); details in consoleReport.txt" : "console API off; see consoleReport.txt");
+    return enabled;
 }
 
 static DWORD WINAPI workerMain(LPVOID) {
@@ -161,19 +162,45 @@ static DWORD WINAPI workerMain(LPVOID) {
             std::ifstream allowInput(allowFile);
             std::string apiName;
             while (std::getline(allowInput, apiName)) {
+                if (!apiName.empty() && apiName.back() == '\r') apiName.pop_back();
                 if (!apiName.empty() && apiName.size() <= 64 && apiName.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._") == std::string::npos)
                     config.api_allow_list.insert(apiName);
             }
         }
+        const bool consoleApiEnabled = config.enforce_api_allow_list &&
+            (config.api_allow_list.contains("console.get") || config.api_allow_list.contains("console.default") ||
+             config.api_allow_list.contains("console.allowed") || config.api_allow_list.contains("console.available"));
         config.limits.event_wall_ms = 20;
         config.limits.event_instructions = 200'000;
         config.log = [&log](std::string_view mod, LogLevel level, std::string_view msg) { log.write(mod, level, msg); };
         ModHost host(std::move(config));
+        const auto initializeConsoleIfAllowed = [&] {
+            if (!consoleApiEnabled) {
+                log.write("host", LogLevel::Info, "console API blocked by installation API Allow List");
+                return;
+            }
+            for (unsigned attempt = 0; attempt < 180 && !gStop.load(); ++attempt) {
+                if (initializeConsole(*engineConsole, base, log)) return;
+                if (attempt % 10 == 9)
+                    log.write("host", LogLevel::Info, "console API is waiting for CS2 convars to register; retrying calibration");
+                Sleep(1000);
+            }
+            log.write("host", LogLevel::Warn, "console API stayed unavailable after 180 seconds; loading mods without it");
+        };
 
-        const std::size_t running = host.load_all();
-        log.write("host", LogLevel::Info, std::to_string(running) + " mod(s) running");
-        host.dispatch("mods_loaded");
         HostPublisher publisher(&host);
+        bool modsLoaded = false;
+        const auto loadMods = [&] {
+            if (modsLoaded) return;
+            log.write("host", LogLevel::Info, "waiting 5 seconds for CS2 startup settings before starting mods");
+            for (int waited = 0; waited < 5000 && !gStop.load(); waited += 100) Sleep(100);
+            if (gStop.load()) return;
+            std::lock_guard<std::mutex> hostLock(gHostMutex);
+            const std::size_t running = host.load_all();
+            log.write("host", LogLevel::Info, std::to_string(running) + " mod(s) running");
+            host.dispatch("mods_loaded");
+            modsLoaded = true;
+        };
 
         bool hooked = false;
         if (waitForModule(L"rendersystemdx11.dll", 180000)) {
@@ -193,13 +220,15 @@ static DWORD WINAPI workerMain(LPVOID) {
             for (int waited = 0; waited < 60000 && !gStop.load() && frameHook::framesSeen() == 0; waited += 250) Sleep(250);
             log.write("host", frameHook::framesSeen() ? LogLevel::Info : LogLevel::Warn,
                       frameHook::framesSeen() ? "first frame seen" : "no frames seen 60 s after installing the hook");
-            initializeConsole(*engineConsole, base, log);
+            initializeConsoleIfAllowed();
+            loadMods();
             for (unsigned beat = 1; !gStop.load(); ++beat) {
                 Sleep(250);
                 if (beat % 4 == 0) host.refresh();
             }
         } else {
-            initializeConsole(*engineConsole, base, log);
+            initializeConsoleIfAllowed();
+            loadMods();
             auto last = std::chrono::steady_clock::now();
             std::uint64_t number = 0;
             while (!gStop.load()) {

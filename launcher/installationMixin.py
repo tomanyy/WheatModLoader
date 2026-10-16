@@ -93,8 +93,7 @@ class InstallationMixin:
             apiAction = menu.addAction("API Allow List…")
             logsAction = menu.addAction("Logs…")
             menu.addSeparator()
-            healthAction = menu.addAction("Check Installation Health")
-            steamCheckAction = menu.addAction("Check Steam Integration")
+            healthAction = menu.addAction("Check Installation & Steam Health")
             exportProfileAction = menu.addAction("Export Install Profile…")
             repairAction = None
             if installation.get("cs2_source") == "latest" and self.steamcmdPath():
@@ -119,8 +118,6 @@ class InstallationMixin:
                 self.openInstallationLogs(installation)
             elif chosen == healthAction:
                 self.checkInstallationHealth(installation)
-            elif chosen == steamCheckAction:
-                self.checkSteamIntegration(installation)
             elif chosen == exportProfileAction:
                 self.exportInstallProfile(installation)
             elif repairAction is not None and chosen == repairAction:
@@ -147,13 +144,21 @@ class InstallationMixin:
                 return
             target = Path(installation.get("path", "")).expanduser()
             platform = installation.get("cs2_platform", "windows")
-            executable = gameExecutable(target, platform)
+            if platform == "linux" and steamLinuxRuntimeExecutable() is None:
+                QMessageBox.warning(
+                    self, "Steam Linux Runtime not found",
+                    "Install or update Steam Linux Runtime 3.0 (sniper) from Steam Tools before adding the Linux Steam entry.",
+                )
+                return
+            runtimeExecutable = gameExecutable(target, platform)
+            executable = gameLaunchExecutable(target, platform)
             proxy = gameBinFor(target, platform) / "winmm.dll"
             try:
                 marker = json.loads((target / MARKER_NAME).read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 marker = {}
-            if not executable.is_file() or not proxy.is_file() or not marker.get("download_complete"):
+            if (not runtimeExecutable.is_file() or not executable.is_file() or not proxy.is_file()
+                    or not marker.get("download_complete")):
                 QMessageBox.warning(self, "Installation not ready", "This Wheat installation is incomplete.")
                 return
             steamRoot = detectSteamClientRoot()
@@ -181,13 +186,15 @@ class InstallationMixin:
             shortcutsFile = config / "shortcuts.vdf"
             title = f"Counter-Strike 2 (Wheat · {installation.get('name', 'Wheat')})"
             try:
-                appidFile = executable.parent / "steam_appid.txt"
+                appidFile = runtimeExecutable.parent / "steam_appid.txt"
                 if not appidFile.is_file() or appidFile.read_text(encoding="ascii").strip() != APP_ID:
                     appidFile.write_text(APP_ID + "\n", encoding="ascii")
                 backup = shortcutsFile.with_name("shortcuts.vdf.bak")
                 if shortcutsFile.exists() and not backup.exists():
                     shutil.copy2(shortcutsFile, backup)
-                added, shortcutId = createOrUpdateSteamEntry(shortcutsFile, title, executable, platform, proxy)
+                layerDir = gameBinFor(target, platform) / "wheat" / "vulkan"
+                layerDir = layerDir if installation.get("vulkan_layer_enabled") and (layerDir / "VK_LAYER_WHEAT_modloader.json").is_file() else None
+                added, shortcutId = createOrUpdateSteamEntry(shortcutsFile, title, executable, platform, proxy, layerDir)
             except (OSError, ValueError, UnicodeError) as exc:
                 QMessageBox.critical(self, "Could not prepare Steam entry", str(exc))
                 return
@@ -354,6 +361,10 @@ class InstallationMixin:
             steamEntryRow.addWidget(steamEntryInfo)
             steamEntryRow.addStretch(1)
             form.addRow("", steamEntryRow)
+            vulkanLayerCheck = QCheckBox("Enable experimental Linux Vulkan overlay layer")
+            vulkanLayerCheck.setChecked(bool(profile and profile.get("vulkan_layer_enabled", False)))
+            vulkanLayerCheck.setToolTip("Opt in to the Vulkan frame callback and ImGui overlay layer. This is experimental; the safe timer fallback stays enabled until the layer sees frames.")
+            form.addRow("", vulkanLayerCheck)
             separateCheck.toggled.connect(lambda full: linkCheck.setChecked(not full))
             linkCheck.toggled.connect(lambda linked: separateCheck.setChecked(not linked))
             linkMode = {"active": False, "platform": None, "source": None, "loader": None, "added_platform": False, "temporary_platform": None}
@@ -361,6 +372,38 @@ class InstallationMixin:
                 button = installButtonRef["button"]
                 if button:
                     button.setEnabled(cs2Combo.count() > 0 and wheatCombo.count() > 0)
+
+            def updateVulkanLayerAvailability(*_):
+                platform = platformCombo.currentData()
+                layerChoice = wheatCombo.currentData()
+                layerPath = Path(layerChoice).with_name("libwheatVulkanLayer.so") if isinstance(layerChoice, str) else None
+                canUseLayer = platform == "linux" and layerPath is not None and layerPath.is_file()
+                hasLocalLayerBuild = platform == "linux" and any(
+                    isinstance(wheatCombo.itemData(index), str)
+                    and Path(wheatCombo.itemData(index)).with_name("libwheatVulkanLayer.so").is_file()
+                    for index in range(wheatCombo.count())
+                )
+                vulkanLayerCheck.setVisible(platform == "linux")
+                vulkanLayerCheck.setEnabled(hasLocalLayerBuild)
+                vulkanLayerCheck.setToolTip(
+                    "Opt in to the separate Vulkan layer for render-thread callbacks. If needed, this switches Wheat Version to the matching local build."
+                    if hasLocalLayerBuild else "Build the Linux loader and libwheatVulkanLayer.so together to enable this option."
+                )
+                if not hasLocalLayerBuild:
+                    vulkanLayerCheck.setChecked(False)
+
+            def selectVulkanLayerBuild(enabled: bool):
+                if not enabled or platformCombo.currentData() != "linux":
+                    return
+                selected = wheatCombo.currentData()
+                if isinstance(selected, str) and Path(selected).with_name("libwheatVulkanLayer.so").is_file():
+                    return
+                for index in range(wheatCombo.count()):
+                    candidate = wheatCombo.itemData(index)
+                    if isinstance(candidate, str) and Path(candidate).with_name("libwheatVulkanLayer.so").is_file():
+                        wheatCombo.setCurrentIndex(index)
+                        return
+                vulkanLayerCheck.setChecked(False)
     
             def updateOptions(*_):
                 platform = platformCombo.currentData()
@@ -378,6 +421,7 @@ class InstallationMixin:
                                     f"No {platform} CS2 source is available. Install SteamCMD or point Vanilla game to a matching {platform} installation.")
                 updateLinkRequirement()
                 updateInstallButton()
+                updateVulkanLayerAvailability()
     
             def updateLinkRequirement(*_):
                 if linkMode["active"]:
@@ -467,6 +511,8 @@ class InstallationMixin:
             linkCheck.toggled.connect(setLinkMode)
     
             platformCombo.currentIndexChanged.connect(updateOptions)
+            wheatCombo.currentIndexChanged.connect(updateVulkanLayerAvailability)
+            vulkanLayerCheck.toggled.connect(selectVulkanLayerBuild)
             cs2Combo.currentIndexChanged.connect(updateLinkRequirement)
             updateOptions()
             if profile:
@@ -480,6 +526,8 @@ class InstallationMixin:
                     loaderIndex = wheatCombo.findText(str(profile["wheat_version"]))
                 if loaderIndex >= 0:
                     wheatCombo.setCurrentIndex(loaderIndex)
+                if profile.get("vulkan_layer_enabled") and vulkanLayerCheck.isEnabled():
+                    vulkanLayerCheck.setChecked(True)
                 if linkCheck.isEnabled():
                     separateCheck.setChecked(bool(profile.get("separate", True)))
     
@@ -588,6 +636,8 @@ class InstallationMixin:
                 "cs2_platform": platform,
                 "wheat_version": wheatCombo.currentText(),
                 "wheat_dll": versionDll,
+                "vulkan_layer": str(Path(versionDll).with_name("libwheatVulkanLayer.so")) if vulkanLayerCheck.isChecked() else "",
+                "vulkan_layer_enabled": vulkanLayerCheck.isChecked(),
                 "separate": separateCheck.isChecked(),
                 "add_steam_entry": steamEntryCheck.isChecked(),
                 "status": "Installing",
@@ -595,8 +645,10 @@ class InstallationMixin:
             if profile:
                 installation["profile_api_allow_list"] = [
                     name for name in profile.get("api_allow_list", [])
-                    if name in {"console.get", "console.default", "console.allowed", "console.available", "data"}
-                ] if isinstance(profile.get("api_allow_list", []), list) else ["console.get", "console.default", "console.allowed", "console.available", "data"]
+                    if name in {"console.get", "console.default", "console.allowed", "console.available", "data",
+                                "imgui.begin", "imgui.text", "imgui.button", "imgui.finish", "imgui.separator", "imgui.same_line"}
+                ] if isinstance(profile.get("api_allow_list", []), list) else ["console.get", "console.default", "console.allowed", "console.available", "data",
+                                                                                 "imgui.begin", "imgui.text", "imgui.button", "imgui.finish", "imgui.separator", "imgui.same_line"]
                 rawMods = profile.get("mods", {}) if isinstance(profile.get("mods", {}), dict) else {}
                 safeModName = lambda name: isinstance(name, str) and bool(name) and name not in (".", "..") and "/" not in name and "\\" not in name
                 installation["profile_mods"] = {
@@ -713,6 +765,29 @@ class InstallationMixin:
             proxy = gameBinFor(target, platform) / "winmm.dll"
             proxy.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(loader, proxy)
+            if installation.get("vulkan_layer_enabled"):
+                layerSource = Path(installation.get("vulkan_layer", ""))
+                if not layerSource.is_file():
+                    raise FileNotFoundError(f"Linux Vulkan layer was not found: {layerSource}")
+                layerDir = proxy.parent / "wheat" / "vulkan"
+                layerDir.mkdir(parents=True, exist_ok=True)
+                layerLibrary = layerDir / "libwheatVulkanLayer.so"
+                shutil.copy2(layerSource, layerLibrary)
+                layerManifest = {
+                    "file_format_version": "1.1.0",
+                    "layers": [{
+                        "name": "VK_LAYER_WHEAT_modloader",
+                        "type": "INSTANCE",
+                        "library_path": str(layerLibrary.resolve()),
+                        "api_version": "1.3.0",
+                        "implementation_version": "1",
+                    "description": "Wheat Linux frame callbacks and ImGui overlay",
+                        "disable_environment": {"WHEAT_DISABLE_VULKAN_LAYER": "1"},
+                        "functions": {"vkNegotiateLoaderLayerInterfaceVersion": "vkNegotiateLoaderLayerInterfaceVersion"},
+                    }],
+                }
+                (layerDir / "VK_LAYER_WHEAT_modloader.json").write_text(
+                    json.dumps(layerManifest, indent=2) + "\n", encoding="utf-8")
             (proxy.parent / "wheat/mods").mkdir(parents=True, exist_ok=True)
             self.applyInstallProfile(installation, platform)
             marker = {
@@ -721,6 +796,7 @@ class InstallationMixin:
                 "source_build_id": sourceBuild or buildIdFor(target),
                 "cs2_version": installation.get("cs2_version"),
                 "cs2_platform": platform,
+                "vulkan_layer_enabled": bool(installation.get("vulkan_layer_enabled", False)),
                 "wheat_version": installation.get("wheat_version"),
                 "separate": bool(installation.get("separate")),
                 "installation_id": installation["id"],
@@ -735,12 +811,18 @@ class InstallationMixin:
                 self.addInstallationToSteam(installation)
 
         def applyInstallProfile(self, installation: dict, platform: str):
+            wheat = gameBinFor(Path(installation["path"]), platform) / "wheat"
+            wheat.mkdir(parents=True, exist_ok=True)
+            allowed = {"console.get", "console.default", "console.allowed", "console.available", "data",
+                       "imgui.begin", "imgui.text", "imgui.button", "imgui.finish", "imgui.separator", "imgui.same_line"}
+            if "profile_api_allow_list" in installation:
+                api = [item for item in installation.get("profile_api_allow_list", []) if item in allowed]
+            else:
+                api = ["console.get", "console.default", "console.allowed", "console.available", "data",
+                       "imgui.begin", "imgui.text", "imgui.button", "imgui.finish", "imgui.separator", "imgui.same_line"]
+            (wheat / "apiAllowList.txt").write_text("".join(item + "\n" for item in api), encoding="utf-8")
             if "profile_api_allow_list" not in installation:
                 return
-            wheat = gameBinFor(Path(installation["path"]), platform) / "wheat"
-            allowed = {"console.get", "console.default", "console.allowed", "console.available", "data"}
-            api = [item for item in installation.get("profile_api_allow_list", []) if item in allowed]
-            (wheat / "apiAllowList.txt").write_text("".join(item + "\n" for item in api), encoding="utf-8")
             sourceRoot = Path(installation.get("profile_mods_source_installation", "")).expanduser()
             sourcePlatform = installation.get("profile_platform", platform)
             sourceWheat = gameBinFor(sourceRoot, sourcePlatform) / "wheat"

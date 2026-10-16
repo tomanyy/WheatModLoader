@@ -15,6 +15,11 @@
 namespace fs = std::filesystem;
 using steady = std::chrono::steady_clock;
 
+#if defined(__linux__)
+void pushImguiApi(lua_State* state, const std::string& name,
+                  const std::set<std::string>& allowed, bool enforce);
+#endif
+
 namespace modloader {
 namespace {
 
@@ -159,9 +164,9 @@ struct ModHost::Impl {
 
         Manifest manifest;
         std::string error;
-        switch (readManifest(dir / "manifest.lua", manifest, error)) {
+        switch (readManifest(dir / "manifest.json", manifest, error)) {
             case ManifestStatus::missing:
-                hostLog(LogLevel::Warn, "mod '" + name + "' has no manifest.lua; using defaults");
+                hostLog(LogLevel::Warn, "mod '" + name + "' has no manifest.json; using defaults");
                 manifest.name = name;
                 manifest.version = "?";
                 manifest.apiVersion = kApiVersion;
@@ -170,10 +175,6 @@ struct ModHost::Impl {
                 hostLog(LogLevel::Error, "mod '" + name + "': " + error);
                 return nullptr;
             case ManifestStatus::ok:
-                if (manifest.name != name) {
-                    hostLog(LogLevel::Error, "mod '" + name + "': manifest name '" + manifest.name + "' must match its folder name");
-                    return nullptr;
-                }
                 if (manifest.apiVersion < 1 || manifest.apiVersion > kApiVersion) {
                     hostLog(LogLevel::Error, "mod '" + name + "' needs API version " + std::to_string(manifest.apiVersion) +
                                                  " but this loader provides " + std::to_string(kApiVersion));
@@ -217,12 +218,25 @@ struct ModHost::Impl {
         }
         const fs::path dataDir = dir / "data";
         if (apiAllowed("data")) mod->sandbox->add_api("data", [dataDir](lua_State* L) { pushDataApi(L, dataDir); });
+#if defined(__linux__)
+        const std::set<std::string> imguiApis{
+            "imgui.begin", "imgui.text", "imgui.button", "imgui.finish", "imgui.separator", "imgui.same_line"
+        };
+        if (std::any_of(imguiApis.begin(), imguiApis.end(), apiAllowed)) {
+            const auto allowed = cfg.api_allow_list;
+            const bool enforce = cfg.enforce_api_allow_list;
+            const std::string displayName = manifest.name;
+            mod->sandbox->add_api("imgui", [displayName, allowed, enforce](lua_State* L) {
+                pushImguiApi(L, displayName, allowed, enforce);
+            });
+        }
+#endif
 
         if (!mod->sandbox->load_main()) {
             hostLog(LogLevel::Error, "mod '" + name + "' failed to load");
             return nullptr;
         }
-        std::string label = "loaded mod '" + name + "' v" + manifest.version;
+        std::string label = "loaded mod '" + manifest.name + "' (internal id '" + name + "') v" + manifest.version;
         if (!manifest.author.empty()) label += " by " + manifest.author;
         hostLog(LogLevel::Info, label);
         return mod;

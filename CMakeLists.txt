@@ -58,6 +58,19 @@ add_library(mod_host STATIC loader/mod_host.cpp loader/manifest.cpp loader/modDa
 target_include_directories(mod_host PUBLIC include loader)
 target_link_libraries(mod_host PUBLIC lua_sandbox)
 
+if(UNIX AND NOT APPLE)
+  set(imguiDir ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
+  set(wheatImGuiSources
+    ${imguiDir}/imgui.cpp
+    ${imguiDir}/imgui_draw.cpp
+    ${imguiDir}/imgui_tables.cpp
+    ${imguiDir}/imgui_widgets.cpp)
+  target_include_directories(mod_host PUBLIC ${imguiDir})
+  target_sources(mod_host PRIVATE loader/imguiApi.cpp)
+endif()
+
 if(MINGW)
   configure_file(loader/proxy/${wheatProxy}Exports.inc ${CMAKE_BINARY_DIR}/gen/proxyExports.inc COPYONLY)
   add_library(loaderProxy SHARED loader/proxyMain.cpp loader/frameHook.cpp loader/engineConsole.cpp loader/proxy/${wheatProxy}.def)
@@ -67,8 +80,15 @@ if(MINGW)
   target_link_options(loaderProxy PRIVATE -static-libgcc -static-libstdc++ -s -Wl,--no-insert-timestamp)
 elseif(UNIX AND NOT APPLE)
   # Linux Steam loads this ELF preload library under the platform-specific build name.
-  add_library(loaderProxy SHARED loader/proxyMainLinux.cpp)
+  find_package(Vulkan REQUIRED)
+  add_library(loaderProxy SHARED loader/proxyMainLinux.cpp loader/engineConsoleLinux.cpp loader/frameHookLinux.cpp ${wheatImGuiSources} ${imguiDir}/backends/imgui_impl_sdl2.cpp)
+  target_include_directories(loaderProxy PRIVATE ${imguiDir} ${imguiDir}/backends)
   set_target_properties(lua_sandbox mod_host PROPERTIES POSITION_INDEPENDENT_CODE ON)
   set_target_properties(loaderProxy PROPERTIES OUTPUT_NAME wheatLinux PREFIX "" SUFFIX ".dll")
-  target_link_libraries(loaderProxy PRIVATE mod_host dl pthread)
+  target_link_libraries(loaderProxy PRIVATE mod_host dl pthread PkgConfig::SDL2)
+  add_library(wheatVulkanLayer SHARED loader/vulkanLayerLinux.cpp)
+  target_sources(wheatVulkanLayer PRIVATE ${imguiDir}/backends/imgui_impl_vulkan.cpp)
+  target_include_directories(wheatVulkanLayer PRIVATE ${Vulkan_INCLUDE_DIRS} ${imguiDir} ${imguiDir}/backends)
+  set_target_properties(wheatVulkanLayer PROPERTIES OUTPUT_NAME wheatVulkanLayer PREFIX "lib" SUFFIX ".so")
+  target_link_libraries(wheatVulkanLayer PRIVATE dl pthread Vulkan::Vulkan)
 endif()

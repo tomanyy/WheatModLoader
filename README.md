@@ -44,12 +44,14 @@ On Linux, install CMake, a C/C++ compiler, and MinGW-w64, then build both platfo
 ./build-all.sh
 ```
 
-This writes `build-linux/wheatLinux.dll` and `build-win/wheatWindows.dll`. The Windows artifact is cross-compiled; the script needs `x86_64-w64-mingw32-g++` available in `PATH`.
+This removes the previous `build-linux-sniper` and `build-win` output directories, then writes fresh `build-linux-sniper/wheatLinux.dll` and `build-win/wheatWindows.dll` artifacts. The Linux runtime is built in Valve's Sniper SDK container to keep it compatible with CS2's Steam Linux Runtime; Docker with its daemon running or Podman is required. The Windows artifact is cross-compiled; the script needs `x86_64-w64-mingw32-g++` available in `PATH`.
 
 ### Requirements
 
 - CMake 3.20 or newer.
+- Vulkan development headers and loader package for Linux builds.
 - A C and C++ compiler with C++20 support.
+- Docker with its daemon running, or Podman, to build the Linux runtime in Valve's Sniper SDK container.
 - For a Windows loader DLL: 64-bit MinGW-w64. The proxy build is enabled when CMake detects MinGW.
 - For a non-vendored Lua build: Lua 5.4 development files.
 - Internet access during a vendored Lua build, so CMake can fetch Lua 5.4.8.
@@ -67,14 +69,7 @@ The Windows proxy is produced as `build/wheatWindows.dll`. The launcher renames 
 
 ### Linux preload library
 
-On Linux, build the native preload library using vendored Lua so the Steam runtime does not need a separate Lua shared library:
-
-```sh
-cmake -S . -B build-linux -DwheatVendorLua=ON
-cmake --build build-linux
-```
-
-The output is an ELF shared object named `build-linux/wheatLinux.dll`. The launcher renames it to `winmm.dll` when installing it into a Wheat installation. It runs Lua mods and frame callbacks on a 10 Hz timer; the Windows D3D11 hook and engine-console reader are not available in this Linux runtime. For cross-compiling to Windows, see [`cmake/mingw-w64-x86_64.cmake`](cmake/mingw-w64-x86_64.cmake).
+`./build-all.sh` builds the preload library inside Valve's Sniper SDK container using vendored Lua so it remains compatible with CS2's Steam runtime. The Linux artifact is an ELF shared object at `build-linux-sniper/wheatLinux.dll`; the launcher installs it as `winmm.dll`. The build also creates a separate `libwheatVulkanLayer.so`. Linux callbacks use a 10 Hz timer by default; a new installation can opt in to the separate Vulkan layer for render-thread callbacks and the experimental ImGui overlay. The layer is not included in existing release downloads yet. Linux console reads are experimental and enable through the installation API Allow List after runtime calibration. See [`docs/modApi.md`](docs/modApi.md) for Linux ImGui usage. For cross-compiling to Windows, see [`cmake/mingw-w64-x86_64.cmake`](cmake/mingw-w64-x86_64.cmake).
 
 ## Wine launch helper
 

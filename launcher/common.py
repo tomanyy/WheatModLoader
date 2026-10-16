@@ -7,8 +7,8 @@ import hashlib
 import html
 import os
 import re
-import shlex
 import shutil
+import shlex
 import signal
 import sys
 import zlib
@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QMenu,
@@ -48,6 +49,8 @@ from PyQt6.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -155,6 +158,20 @@ def gameExecutable(gameDir: Path, platform: str) -> Path:
     return gameBinFor(gameDir, platform) / ("cs2" if platform == "linux" else "cs2.exe")
 
 
+def steamLinuxRuntimeExecutable() -> Path | None:
+    for library in steamLibraries():
+        runtime = library / "steamapps/common/SteamLinuxRuntime_sniper/run"
+        if runtime.is_file() and os.access(runtime, os.X_OK):
+            return runtime
+    return None
+
+
+def gameLaunchExecutable(gameDir: Path, platform: str) -> Path:
+    if platform == "linux":
+        return steamLinuxRuntimeExecutable() or gameDir / "game/cs2.sh"
+    return gameExecutable(gameDir, platform)
+
+
 def gamePlatform(gameDir: Path) -> str | None:
     if gameExecutable(gameDir, "windows").is_file():
         return "windows"
@@ -190,7 +207,7 @@ def isLoaderForPlatform(path: Path, platform: str) -> bool:
 def detectWheatDll(platform: str | None = None) -> Path | None:
     selectedPlatform = platform or ("linux" if sys.platform.startswith("linux") else "windows")
     artifactName = "wheatLinux.dll" if selectedPlatform == "linux" else "wheatWindows.dll"
-    buildDirectories = ("build-linux", "build", "build/Release", "Release") if selectedPlatform == "linux" else ("build-win", "build", "build/Release", "Release")
+    buildDirectories = ("build-linux-sniper", "build-linux", "build", "build/Release", "Release") if selectedPlatform == "linux" else ("build-win", "build", "build/Release", "Release")
     candidates = tuple(REPO_ROOT / directory / artifactName for directory in buildDirectories) + (REPO_ROOT / artifactName,)
     for candidate in candidates:
         if candidate.is_file() and (platform is None or isLoaderForPlatform(candidate, platform)):
@@ -279,7 +296,8 @@ def vdfValue(entries: list[tuple[str, tuple[int, object]]], key: str):
 
 
 def createOrUpdateSteamEntry(shortcutsFile: Path, title: str, executable: Path,
-                                 platform: str = "windows", proxy: Path | None = None) -> tuple[bool, int]:
+                                 platform: str = "windows", proxy: Path | None = None,
+                                 vulkanLayerDir: Path | None = None) -> tuple[bool, int]:
     root = parseBinaryVdf(shortcutsFile.read_bytes()) if shortcutsFile.exists() else []
     shortcutsField = next((typed for key, typed in root if key == "shortcuts"), None)
     if shortcutsField is not None and shortcutsField[0] != 0:
@@ -291,7 +309,8 @@ def createOrUpdateSteamEntry(shortcutsFile: Path, title: str, executable: Path,
     executable = Path(os.path.abspath(os.fspath(executable.expanduser())))
     exePath = str(executable)
     exe = f'"{exePath}"'
-    startDir = f'"{executable.parent}"'
+    workingDirectory = proxy.parent.parent.parent if platform == "linux" and proxy is not None else executable.parent
+    startDir = f'"{workingDirectory}"'
     shortcutId = zlib.crc32((exe + title).encode("utf-8")) | 0x80000000
     signedShortcutId = shortcutId - 0x100000000
     shortcut = None
@@ -300,8 +319,9 @@ def createOrUpdateSteamEntry(shortcutsFile: Path, title: str, executable: Path,
             continue
         fields = typed[1]
         oldExe = vdfValue(fields, "Exe")
+        oldTitle = vdfValue(fields, "AppName")
         oldExePath = oldExe[1:-1] if isinstance(oldExe, str) and len(oldExe) >= 2 and oldExe[0] == oldExe[-1] == '"' else oldExe
-        sameExecutable = oldExe == exe
+        sameExecutable = oldExe == exe or oldTitle == title
         if isinstance(oldExePath, str):
             try:
                 sameExecutable = sameExecutable or Path(oldExePath).resolve(strict=False) == executable.resolve(strict=False)
@@ -314,12 +334,16 @@ def createOrUpdateSteamEntry(shortcutsFile: Path, title: str, executable: Path,
     if shortcut is None:
         shortcut = []
         shortcuts.append((str(len(shortcuts)), (0, shortcut)))
-    launchOptions = "SteamAppId=730 SteamGameId=730 %command% -insecure"
+    launchOptions = "-steam -insecure"
     if platform == "linux" and proxy is not None:
-        proxyPath = str(Path(os.path.abspath(os.fspath(proxy.expanduser()))))
-        launchOptions = f"SteamAppId=730 SteamGameId=730 LD_PRELOAD={shlex.quote(proxyPath)} %command% -insecure"
-    elif platform == "windows":
-        launchOptions = "SteamAppId=730 SteamGameId=730 WINEDLLOVERRIDES=winmm=n,b %command% -insecure"
+        proxyPath = os.path.relpath(proxy, workingDirectory)
+        layerOptions = ""
+        if vulkanLayerDir is not None:
+            layerPath = os.path.abspath(os.fspath(vulkanLayerDir))
+            layerOptions = f"WHEAT_ENABLE_VULKAN_LAYER=1 VK_ADD_IMPLICIT_LAYER_PATH={shlex.quote(layerPath)} "
+        launchOptions = f"{layerOptions}LD_PRELOAD={proxyPath} %command% -- ./cs2.sh -steam -insecure"
+    elif platform == "windows" and sys.platform.startswith("linux"):
+        launchOptions = "WINEDLLOVERRIDES=winmm=n,b %command% -steam -insecure"
     values = {
         "appid": steamVdfInt(signedShortcutId),
         "AppName": steamVdfString(title), "Exe": steamVdfString(exe),
